@@ -1,0 +1,15 @@
+#!/usr/bin/env stryke
+# examples/produce_one.stk — send a single message.
+# Run:   KAFKA_BROKERS=localhost:9092 s examples/produce_one.stk my-topic 'hello'
+
+use Kafka
+
+my ($topic, $value, $key) = @ARGV
+die "usage: produce_one.stk TOPIC VALUE [KEY]\n" unless defined $value
+
+my %opts = ()
+$opts{key} = $key if defined $key
+$opts{headers} = { source => "stryke-example" }
+
+my $r = Kafka::produce $topic, $value, %opts
+p "wrote to $r->{topic}/$r->{partition} @ offset $r->{offset}"

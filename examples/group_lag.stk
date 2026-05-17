@@ -1,0 +1,24 @@
+#!/usr/bin/env stryke
+# examples/group_lag.stk — show consumer-group lag per partition.
+# Run:   KAFKA_BROKERS=localhost:9092 s examples/group_lag.stk my-consumer-group
+
+use Kafka
+
+my $group = $ARGV[0]
+die "usage: group_lag.stk GROUP [TOPIC]\n" unless defined $group
+
+my %opts
+$opts{topic} = $ARGV[1] if defined $ARGV[1]
+
+my @rows = Kafka::lag $group, %opts
+my $total = 0
+for my $r (@rows) {
+    if (defined $r->{total_lag}) {
+        $total = $r->{total_lag}
+        next
+    }
+    p sprintf("%-30s p%2d  committed=%-10d  high=%-10d  lag=%d",
+              $r->{topic}, $r->{partition},
+              $r->{committed}, $r->{high_watermark}, $r->{lag})
+}
+p "------- TOTAL LAG: $total -------"

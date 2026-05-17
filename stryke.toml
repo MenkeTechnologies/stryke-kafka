@@ -1,0 +1,19 @@
+[package]
+name = "kafka"
+version = "0.1.0"
+description = "Apache Kafka client for stryke. Produce, consume, admin, and consumer-group lag against any Kafka 0.10+ cluster. Opt-in package tier."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-kafka"
+edition = "2026"
+
+[bin]
+kafka = "bin/kafka.stk"
+kafka-build = "bin/kafka-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."

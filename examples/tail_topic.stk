@@ -1,0 +1,20 @@
+#!/usr/bin/env stryke
+# examples/tail_topic.stk — tail a topic for new messages, JSON-decoded.
+# Run:   KAFKA_BROKERS=localhost:9092 s examples/tail_topic.stk my-topic
+
+use Kafka
+
+my $topic = $ARGV[0]
+die "usage: tail_topic.stk TOPIC\n" unless defined $topic
+
+p "tailing $topic — Ctrl-C to stop"
+my $n = Kafka::consume_stream $topic,
+    offset_reset => "latest",
+    value_mode   => "json",
+    idle_ms      => 60_000,
+    callback     => sub ($m) {
+        p sprintf("[%d.%d @ %d]  key=%s  val=%s",
+                  $m->{partition}, $m->{offset}, $m->{timestamp},
+                  $m->{key} // "-", to_json($m->{value}))
+    }
+warn "stopped after $n msgs\n"

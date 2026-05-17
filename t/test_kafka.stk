@@ -1,0 +1,98 @@
+# t/test_kafka.stk — round-trip tests against a live Kafka cluster.
+#
+# Skips cleanly when:
+#   * the helper isn't built
+#   * $KAFKA_BROKERS isn't set
+#   * the broker isn't reachable
+
+require "./lib/Kafka.stk"
+
+my $have_helper = eval { Kafka::helper_path(); 1 }
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+unless (defined $ENV{KAFKA_BROKERS} && $ENV{KAFKA_BROKERS} ne "") {
+    p "1..0 # SKIP \$KAFKA_BROKERS not set"
+    exit 0
+}
+unless (Kafka::ping()) {
+    p "1..0 # SKIP cannot reach Kafka at $ENV{KAFKA_BROKERS}"
+    exit 0
+}
+
+my $topic = "stryke-kafka-test-$$"
+p "1..7"
+my $i = 0
+
+# 1. cluster metadata
+my $cl
+eval { $cl = Kafka::cluster() }
+$i++
+p $@ ? "not ok $i - cluster: $@" :
+       ($cl->{broker_count} > 0 ? "ok $i - cluster (#{$cl->{broker_count}} brokers)" :
+        "not ok $i - cluster broker_count=0")
+
+# 2. create topic
+my $c
+eval { $c = Kafka::create_topic($topic, partitions => 2, replication => 1) }
+$i++
+p $@ ? "not ok $i - create_topic: $@" :
+       ($c->{created} ? "ok $i - create_topic" :
+        "not ok $i - create_topic: $c->{error}")
+
+# 3. topics list (find ours)
+my @tlist
+eval { @tlist = Kafka::topics() }
+$i++
+if ($@) {
+    p "not ok $i - topics: $@"
+} else {
+    my $found = 0
+    for my $t (@tlist) {
+        $found = 1 if $t->{name} eq $topic
+    }
+    p ($found ? "ok $i - topics (found $topic)"
+              : "not ok $i - topics missing $topic")
+}
+
+# 4. produce one
+my $r
+eval { $r = Kafka::produce($topic, "hello-stryke", key => "k1") }
+$i++
+p $@ ? "not ok $i - produce: $@" :
+       (defined $r->{offset} ? "ok $i - produce (offset=$r->{offset})" :
+        "not ok $i - produce bad shape")
+
+# 5. produce_many
+my $rm
+eval {
+    $rm = Kafka::produce_many(
+        [ map { { topic => $topic, value => "msg-$_", key => "k$_" } } (1:5) ]
+    )
+}
+$i++
+p $@ ? "not ok $i - produce_many: $@" :
+       ($rm->{sent} == 5 ? "ok $i - produce_many" :
+        "not ok $i - produce_many sent=$rm->{sent}")
+
+# 6. consume back (from beginning)
+my @msgs
+eval {
+    @msgs = Kafka::consume(
+        $topic,
+        offset_reset => "earliest",
+        group        => "stryke-test-$$",
+        max          => 6,
+        idle_ms      => 5_000,
+    )
+}
+$i++
+p $@ ? "not ok $i - consume: $@" :
+       (len(@msgs) >= 6 ? "ok $i - consume (got #{len(@msgs)} msgs)" :
+        "not ok $i - consume got only #{len(@msgs)} msgs")
+
+# 7. delete topic
+eval { Kafka::delete_topic($topic) }
+$i++
+p $@ ? "not ok $i - delete_topic: $@" : "ok $i - delete_topic"
