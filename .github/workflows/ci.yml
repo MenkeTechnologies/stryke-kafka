@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       kafka:
-        image: bitnami/kafka:3.7
+        image: bitnami/kafka:3.9
         env:
           KAFKA_CFG_NODE_ID: 0
           KAFKA_CFG_PROCESS_ROLES: controller,broker
