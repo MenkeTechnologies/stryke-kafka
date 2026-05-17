@@ -108,8 +108,14 @@ jobs:
           # Push 5 messages via NDJSON streaming.
           printf '{"value":"a","key":"1"}\n{"value":"b","key":"2"}\n{"value":"c","key":"3"}\n{"value":"d","key":"4"}\n{"value":"e","key":"5"}\n' \
             | $H produce stream --default-topic=ci-smoke | jq -e '.sent == 5'
-          # Consume them back.
-          $H consume ci-smoke --offset-reset=earliest --max=6 --idle-ms=5000 --group=ci-smoke-grp | wc -l | tr -d ' ' | grep -x 6
+          # Give the broker a moment to fsync the last batch before a fresh
+          # consumer group tries to subscribe + assign + fetch.
+          sleep 2
+          # Consume them back. Generous idle so the consumer-group join +
+          # assignment + first fetch can complete on a cold runner.
+          n=$($H consume ci-smoke --offset-reset=earliest --max=6 --idle-ms=30000 --group=ci-smoke-grp | wc -l | tr -d ' ')
+          echo "consume returned $n messages"
+          [ "$n" = 6 ]
           $H admin describe ci-smoke | jq -e '.partition_count == 2'
           $H admin delete-topic ci-smoke | jq -e '.deleted == true'
 
