@@ -1,12 +1,46 @@
-# stryke-kafka
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ k a f k a ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-kafka/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-kafka/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[APACHE KAFKA CLIENT FOR STRYKE // PRODUCER + CONSUMER + ADMIN + CONSUMER-GROUP LAG]`
+
+> *"Streams without the JVM."*
 
 Apache Kafka client for stryke — producer, consumer, admin, and
 consumer-group lag. Opt-in package tier, kept out of the stryke core
 binary so the daily-driver install stays slim.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-redis`](https://github.com/MenkeTechnologies/stryke-redis) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## Why this is a package, not a builtin
+---
+
+## Table of Contents
+
+- [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick start](#0x02-quick-start)
+- [\[0x03\] CLI: `kafka`](#0x03-cli-kafka)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Tests](#0x06-tests)
+- [\[0x07\] Dev workflow](#0x07-dev-workflow)
+- [\[0x08\] Layout](#0x08-layout)
+- [\[0x09\] Roadmap](#0x09-roadmap)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Why this is a package, not a builtin
 
 Kafka integration requires librdkafka, the canonical C client that every
 Kafka tool eventually wraps. The Rust binding (`rdkafka`) builds against
@@ -19,7 +53,7 @@ once, get full producer + consumer + admin + lag tooling.
 via `rdkafka`'s `cmake-build` feature, so the binary is portable across
 glibc / musl / macOS without depending on a system `libkafka.so`.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-kafka
@@ -36,7 +70,7 @@ make install
 The first build is the slow one — subsequent builds reuse the cached
 librdkafka archive.
 
-## Quick start
+## [0x02] Quick start
 
 ```stryke
 use Kafka
@@ -105,7 +139,7 @@ Kafka::topics(%prod) |> ep
 Kafka::produce("events", "x", %prod)
 ```
 
-## CLI: `kafka`
+## [0x03] CLI: `kafka`
 
 ```sh
 kafka produce send my-topic --value='hello' --key=k1
@@ -149,7 +183,7 @@ Global flags (env vars in brackets):
     --timeout-ms MS                  default: 10000
 ```
 
-## API reference
+## [0x04] API reference
 
 ### Producer
 
@@ -205,7 +239,7 @@ Kafka::ensure_built()   → $abs_path
 Kafka::version()        → "stryke-kafka-helper 0.1.0"
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 ```sh
 stryke-kafka-helper -b localhost:9092 produce send my-topic --value=hello
@@ -224,7 +258,7 @@ Output:
 * `cluster`, `describe`, `create-topic`, `delete-topic`, `ping` → single JSON
 * `ping` also prints `ok brokers=N topics=N` on stdout, exit 0
 
-## Tests
+## [0x06] Tests
 
 ```sh
 cargo test                                          # compiles, no live calls
@@ -249,7 +283,7 @@ docker run --rm -p 9092:9092 \
     bitnami/kafka:3.9
 ```
 
-## Dev workflow
+## [0x07] Dev workflow
 
 ```sh
 make             # release build (first time: ~3-5 min for librdkafka)
@@ -259,7 +293,7 @@ make install
 make clean
 ```
 
-## Layout
+## [0x08] Layout
 
 ```
 stryke-kafka/
@@ -288,7 +322,7 @@ stryke-kafka/
     release.yml                    # cross-compile + GH release on tag push
 ```
 
-## Roadmap
+## [0x09] Roadmap
 
 | v1 (this release) | v2+ |
 |---|---|
@@ -297,6 +331,6 @@ stryke-kafka/
 | One-shot consume per call | Long-running consumer daemon over a Unix socket |
 | Text / binary / JSON value modes | Avro / Protobuf value modes via Schema Registry |
 
-## License
+## [0xFF] License
 
 MIT.
