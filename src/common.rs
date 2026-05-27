@@ -479,4 +479,63 @@ mod tests {
         c.extra_conf = vec!["k= v ".into()];
         assert_eq!(c.build_config().unwrap().get("k"), Some(" v "));
     }
+
+    #[test]
+    fn build_config_sasl_plain_mechanism() {
+        let mut c = base_conn();
+        c.sasl_mechanism = Some("PLAIN".into());
+        assert_eq!(c.build_config().unwrap().get("sasl.mechanism"), Some("PLAIN"));
+    }
+
+    #[test]
+    fn build_config_multiple_extra_conf_keys() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["a=1".into(), "b=2".into()];
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("a"), Some("1"));
+        assert_eq!(cfg.get("b"), Some("2"));
+    }
+
+    #[test]
+    fn timeout_five_seconds() {
+        let mut c = base_conn();
+        c.timeout_ms = 5_000;
+        assert_eq!(c.timeout(), Duration::from_millis(5_000));
+    }
+
+    #[test]
+    fn build_config_brokers_port_only() {
+        let mut c = base_conn();
+        c.brokers = Some("localhost:9092".into());
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some("localhost:9092"),
+        );
+    }
+
+    #[test]
+    fn emit_ndjson_line_false() {
+        let mut buf = Vec::new();
+        emit_ndjson_line(&mut buf, &serde_json::json!(false)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "false\n");
+    }
+
+    #[test]
+    fn build_config_ssl_key_password_set() {
+        let mut c = base_conn();
+        c.ssl_key_password = Some("pw".into());
+        assert_eq!(c.build_config().unwrap().get("ssl.key.password"), Some("pw"));
+    }
+
+    #[test]
+    fn build_config_no_security_protocol_by_default() {
+        assert_eq!(base_conn().build_config().unwrap().get("security.protocol"), None);
+    }
+
+    #[test]
+    fn build_config_socket_timeout_matches() {
+        let mut c = base_conn();
+        c.timeout_ms = 15_000;
+        assert_eq!(c.build_config().unwrap().get("socket.timeout.ms"), Some("15000"));
+    }
 }

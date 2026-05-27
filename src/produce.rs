@@ -295,6 +295,57 @@ mod tests {
     fn parse_headers_preserves_key_case() {
         assert_eq!(parse_headers(&["X-Request-ID=1".into()]).get(0).key, "X-Request-ID");
     }
+
+    #[test]
+    fn parse_headers_content_type_json() {
+        let h = parse_headers(&["content-type=application/json".into()]);
+        assert_eq!(h.get(0).key, "content-type");
+    }
+
+    #[test]
+    fn parse_headers_eight_pairs() {
+        let specs: Vec<String> = (0..8).map(|i| format!("h{i}={i}")).collect();
+        assert_eq!(parse_headers(&specs).count(), 8);
+    }
+
+    #[test]
+    fn parse_headers_value_with_slash() {
+        assert_eq!(
+            parse_headers(&["path=/a/b".into()]).get(0).value,
+            Some(b"/a/b".as_ref()),
+        );
+    }
+
+    #[test]
+    fn parse_headers_key_with_dot() {
+        assert_eq!(parse_headers(&["meta.version=1".into()]).get(0).key, "meta.version");
+    }
+
+    #[test]
+    fn parse_headers_only_malformed_returns_empty() {
+        assert_eq!(parse_headers(&["bad".into()]).count(), 0);
+    }
+
+    #[test]
+    fn parse_headers_value_utf8_emoji() {
+        let h = parse_headers(&["msg=🦀".into()]);
+        assert_eq!(h.get(0).value, Some("🦀".as_bytes()));
+    }
+
+    #[test]
+    fn parse_headers_two_equals_in_value() {
+        assert_eq!(
+            parse_headers(&["jwt=a=b=c".into()]).get(0).value,
+            Some(b"a=b=c".as_ref()),
+        );
+    }
+
+    #[test]
+    fn parse_headers_first_key_wins_order() {
+        let h = parse_headers(&["a=1".into(), "b=2".into()]);
+        assert_eq!(h.get(0).key, "a");
+        assert_eq!(h.get(1).key, "b");
+    }
 }
 
 async fn send_one(

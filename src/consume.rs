@@ -317,4 +317,54 @@ mod tests {
     fn uuid_like_differs_from_zero_padded() {
         assert_ne!(uuid_like(), "00000000000000000000000000000000");
     }
+
+    #[test]
+    fn uuid_like_len_at_most_32() {
+        assert!(uuid_like().len() <= 32);
+    }
+
+    #[test]
+    fn uuid_like_starts_with_digit_allowed() {
+        let s = uuid_like();
+        assert!(s.chars().next().unwrap().is_ascii_hexdigit());
+    }
+
+    #[test]
+    fn uuid_like_two_consecutive_differ_with_sleep() {
+        let a = uuid_like();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_ne!(a, uuid_like());
+    }
+
+    #[test]
+    fn uuid_like_no_uppercase_a_f() {
+        let s = uuid_like();
+        assert!(!s.chars().any(|c| ('A'..='F').contains(&c)));
+    }
+
+    #[test]
+    fn uuid_like_from_str_radix_hex() {
+        let n = u128::from_str_radix(&uuid_like(), 16).unwrap();
+        assert!(n > 0);
+    }
+
+    #[test]
+    fn uuid_like_consistent_format() {
+        let s = uuid_like();
+        assert!(!s.starts_with("0x"));
+    }
+
+    #[test]
+    fn uuid_like_batch_non_empty() {
+        let ids: Vec<_> = (0..5).map(|_| uuid_like()).collect();
+        assert!(ids.iter().all(|s| !s.is_empty()));
+    }
+
+    #[test]
+    fn uuid_like_sorted_pair() {
+        let a = uuid_like();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let b = uuid_like();
+        assert!(a <= b);
+    }
 }
