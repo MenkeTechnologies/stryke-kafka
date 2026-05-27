@@ -265,4 +265,218 @@ mod tests {
         }
         assert_eq!(String::from_utf8(buf).unwrap().lines().count(), 5);
     }
+
+    #[test]
+    fn build_config_multi_broker_list_preserved() {
+        let mut c = base_conn();
+        c.brokers = Some("b1:9092,b2:9092,b3:9092".into());
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("bootstrap.servers"), Some("b1:9092,b2:9092,b3:9092"));
+    }
+
+    #[test]
+    fn build_config_socket_timeout_matches_timeout_ms() {
+        let mut c = base_conn();
+        c.timeout_ms = 42_000;
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("socket.timeout.ms"), Some("42000"));
+    }
+
+    #[test]
+    fn build_config_empty_extra_conf_ok() {
+        let cfg = base_conn().build_config().unwrap();
+        assert_eq!(cfg.get("linger.ms"), None);
+    }
+
+    #[test]
+    fn build_config_client_id_with_dots() {
+        let mut c = base_conn();
+        c.client_id = "app.prod.worker".into();
+        assert_eq!(c.build_config().unwrap().get("client.id"), Some("app.prod.worker"));
+    }
+
+    #[test]
+    fn build_config_sasl_password_only_without_username() {
+        let mut c = base_conn();
+        c.sasl_password = Some("secret".into());
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("sasl.username"), None);
+        assert_eq!(cfg.get("sasl.password"), Some("secret"));
+    }
+
+    #[test]
+    fn timeout_large_ms() {
+        let mut c = base_conn();
+        c.timeout_ms = 600_000;
+        assert_eq!(c.timeout(), Duration::from_millis(600_000));
+    }
+
+    #[test]
+    fn build_config_extra_conf_empty_value() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["allow.auto.create.topics=".into()];
+        assert_eq!(c.build_config().unwrap().get("allow.auto.create.topics"), Some(""));
+    }
+
+    #[test]
+    fn build_config_security_protocol_plaintext() {
+        let mut c = base_conn();
+        c.security_protocol = Some("PLAINTEXT".into());
+        assert_eq!(c.build_config().unwrap().get("security.protocol"), Some("PLAINTEXT"));
+    }
+
+    #[test]
+    fn build_config_ssl_ca_only() {
+        let mut c = base_conn();
+        c.ssl_ca = Some("/etc/ssl/ca.pem".into());
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("ssl.ca.location"), Some("/etc/ssl/ca.pem"));
+        assert_eq!(cfg.get("ssl.certificate.location"), None);
+    }
+
+    #[test]
+    fn build_config_brokers_single_host() {
+        let mut c = base_conn();
+        c.brokers = Some("kafka:9092".into());
+        assert_eq!(c.build_config().unwrap().get("bootstrap.servers"), Some("kafka:9092"));
+    }
+
+    #[test]
+    fn build_config_extra_conf_overrides_bootstrap() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["bootstrap.servers=override:9092".into()];
+        assert_eq!(c.build_config().unwrap().get("bootstrap.servers"), Some("override:9092"));
+    }
+
+    #[test]
+    fn build_config_sasl_mechanism_only() {
+        let mut c = base_conn();
+        c.sasl_mechanism = Some("SCRAM-SHA-512".into());
+        assert_eq!(
+            c.build_config().unwrap().get("sasl.mechanism"),
+            Some("SCRAM-SHA-512"),
+        );
+    }
+
+    #[test]
+    fn build_config_ssl_cert_and_key_without_ca() {
+        let mut c = base_conn();
+        c.ssl_cert = Some("/c.pem".into());
+        c.ssl_key = Some("/k.pem".into());
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("ssl.certificate.location"), Some("/c.pem"));
+        assert_eq!(cfg.get("ssl.key.location"), Some("/k.pem"));
+        assert_eq!(cfg.get("ssl.ca.location"), None);
+    }
+
+    #[test]
+    fn timeout_zero_ms() {
+        let mut c = base_conn();
+        c.timeout_ms = 0;
+        assert_eq!(c.timeout(), Duration::from_millis(0));
+    }
+
+    #[test]
+    fn build_config_extra_conf_multiple_same_key_last_wins() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["a=1".into(), "a=2".into()];
+        assert_eq!(c.build_config().unwrap().get("a"), Some("2"));
+    }
+
+    #[test]
+    fn emit_ndjson_line_null() {
+        let mut buf = Vec::new();
+        emit_ndjson_line(&mut buf, &serde_json::Value::Null).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "null\n");
+    }
+
+    #[test]
+    fn build_config_security_protocol_sasl_plaintext() {
+        let mut c = base_conn();
+        c.security_protocol = Some("SASL_PLAINTEXT".into());
+        assert_eq!(
+            c.build_config().unwrap().get("security.protocol"),
+            Some("SASL_PLAINTEXT"),
+        );
+    }
+
+    #[test]
+    fn build_config_brokers_with_spaces_preserved() {
+        let mut c = base_conn();
+        c.brokers = Some(" host:9092 ".into());
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some(" host:9092 "),
+        );
+    }
+
+    #[test]
+    fn build_config_ssl_key_password_only() {
+        let mut c = base_conn();
+        c.ssl_key_password = Some("pw".into());
+        assert_eq!(c.build_config().unwrap().get("ssl.key.password"), Some("pw"));
+    }
+
+    #[test]
+    fn build_config_sasl_username_only() {
+        let mut c = base_conn();
+        c.sasl_username = Some("alice".into());
+        assert_eq!(c.build_config().unwrap().get("sasl.username"), Some("alice"));
+    }
+
+    #[test]
+    fn build_config_extra_conf_numeric_key() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["socket.keepalive.enable=1".into()];
+        assert_eq!(
+            c.build_config().unwrap().get("socket.keepalive.enable"),
+            Some("1"),
+        );
+    }
+
+    #[test]
+    fn timeout_one_ms() {
+        let mut c = base_conn();
+        c.timeout_ms = 1;
+        assert_eq!(c.timeout(), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn build_config_brokers_ipv6_literal() {
+        let mut c = base_conn();
+        c.brokers = Some("[::1]:9092".into());
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some("[::1]:9092"),
+        );
+    }
+
+    #[test]
+    fn emit_ndjson_line_object() {
+        let mut buf = Vec::new();
+        emit_ndjson_line(&mut buf, &serde_json::json!({"k": 1})).unwrap();
+        assert!(String::from_utf8(buf).unwrap().contains("\"k\":1"));
+    }
+
+    #[test]
+    fn build_config_security_protocol_ssl() {
+        let mut c = base_conn();
+        c.security_protocol = Some("SSL".into());
+        assert_eq!(c.build_config().unwrap().get("security.protocol"), Some("SSL"));
+    }
+
+    #[test]
+    fn build_config_client_id_from_conn() {
+        assert_eq!(
+            base_conn().build_config().unwrap().get("client.id"),
+            Some("test-client"),
+        );
+    }
+
+    #[test]
+    fn build_config_extra_conf_trims_nothing_on_value() {
+        let mut c = base_conn();
+        c.extra_conf = vec!["k= v ".into()];
+        assert_eq!(c.build_config().unwrap().get("k"), Some(" v "));
+    }
 }

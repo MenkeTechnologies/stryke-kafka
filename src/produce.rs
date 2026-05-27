@@ -141,6 +141,160 @@ mod tests {
         assert_eq!(h.get(0).value, Some(b"1".as_ref()));
         assert_eq!(h.get(1).value, Some(b"2".as_ref()));
     }
+
+    #[test]
+    fn parse_headers_empty_key_allowed() {
+        let h = parse_headers(&["=v".into()]);
+        assert_eq!(h.count(), 1);
+        assert_eq!(h.get(0).key, "");
+        assert_eq!(h.get(0).value, Some(b"v".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_whitespace_in_value_preserved() {
+        let h = parse_headers(&["x= hello ".into()]);
+        assert_eq!(h.get(0).value, Some(b" hello ".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_tab_in_value() {
+        let h = parse_headers(&["k=v\tw".into()]);
+        assert_eq!(h.get(0).value, Some(b"v\tw".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_single_header_count_one() {
+        assert_eq!(parse_headers(&["trace=1".into()]).count(), 1);
+    }
+
+    #[test]
+    fn parse_headers_many_pairs() {
+        let specs: Vec<String> = (0..10).map(|i| format!("h{i}={i}")).collect();
+        assert_eq!(parse_headers(&specs).count(), 10);
+    }
+
+    #[test]
+    fn parse_headers_key_with_dashes() {
+        let h = parse_headers(&["x-correlation-id=abc".into()]);
+        assert_eq!(h.get(0).key, "x-correlation-id");
+    }
+
+    #[test]
+    fn parse_headers_utf8_value() {
+        let h = parse_headers(&["msg=日本語".into()]);
+        assert_eq!(h.get(0).value, Some("日本語".as_bytes()));
+    }
+
+    #[test]
+    fn parse_headers_only_equals_sign_pair() {
+        assert_eq!(parse_headers(&["=".into()]).count(), 1);
+    }
+
+    #[test]
+    fn parse_headers_value_is_digits() {
+        let h = parse_headers(&["code=404".into()]);
+        assert_eq!(h.get(0).value, Some(b"404".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_long_value() {
+        let long = "x".repeat(256);
+        let spec = format!("payload={long}");
+        let h = parse_headers(&[spec]);
+        assert_eq!(h.get(0).value.unwrap().len(), 256);
+    }
+
+    #[test]
+    fn parse_headers_key_with_underscore() {
+        let h = parse_headers(&["trace_id=abc".into()]);
+        assert_eq!(h.get(0).key, "trace_id");
+    }
+
+    #[test]
+    fn parse_headers_three_malformed_one_valid() {
+        let h = parse_headers(&["bad".into(), "a=1".into(), "also-bad".into(), "b=2".into()]);
+        assert_eq!(h.count(), 2);
+    }
+
+    #[test]
+    fn parse_headers_value_newline() {
+        let h = parse_headers(&["body=a\nb".into()]);
+        assert_eq!(h.get(0).value, Some(b"a\nb".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_order_preserved_five() {
+        let h = parse_headers(&[
+            "h1=1".into(),
+            "h2=2".into(),
+            "h3=3".into(),
+            "h4=4".into(),
+            "h5=5".into(),
+        ]);
+        assert_eq!(h.count(), 5);
+        assert_eq!(h.get(4).key, "h5");
+    }
+
+    #[test]
+    fn parse_headers_colon_not_separator() {
+        // Only '=' splits; colon stays in value if using '=' form.
+        let h = parse_headers(&["k=v:w".into()]);
+        assert_eq!(h.get(0).value, Some(b"v:w".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_zero_length_value_after_equals() {
+        assert_eq!(parse_headers(&["k=".into()]).get(0).value, Some(b"".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_binary_null_byte_in_value() {
+        let h = parse_headers(&["bin=a\0b".into()]);
+        assert_eq!(h.get(0).value, Some(b"a\0b".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_key_starts_with_x() {
+        let h = parse_headers(&["x-trace=1".into()]);
+        assert_eq!(h.get(0).key, "x-trace");
+    }
+
+    #[test]
+    fn parse_headers_two_valid_one_invalid() {
+        assert_eq!(
+            parse_headers(&["a=1".into(), "bad".into(), "b=2".into()]).count(),
+            2,
+        );
+    }
+
+    #[test]
+    fn parse_headers_value_is_zero() {
+        assert_eq!(parse_headers(&["n=0".into()]).get(0).value, Some(b"0".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_seven_pairs() {
+        let specs: Vec<String> = (0..7).map(|i| format!("h{i}={i}")).collect();
+        assert_eq!(parse_headers(&specs).count(), 7);
+    }
+
+    #[test]
+    fn parse_headers_key_only_equals() {
+        assert_eq!(parse_headers(&["=".into()]).get(0).key, "");
+    }
+
+    #[test]
+    fn parse_headers_value_pipe_char() {
+        assert_eq!(
+            parse_headers(&["k=a|b".into()]).get(0).value,
+            Some(b"a|b".as_ref()),
+        );
+    }
+
+    #[test]
+    fn parse_headers_preserves_key_case() {
+        assert_eq!(parse_headers(&["X-Request-ID=1".into()]).get(0).key, "X-Request-ID");
+    }
 }
 
 async fn send_one(

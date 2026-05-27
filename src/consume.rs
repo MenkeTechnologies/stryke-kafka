@@ -180,4 +180,141 @@ mod tests {
         assert!(s.len() >= 8, "len = {} for {s}", s.len());
         assert!(s.len() <= 32, "len = {} for {s}", s.len());
     }
+
+    #[test]
+    fn uuid_like_no_uppercase_hex() {
+        let s = uuid_like();
+        assert!(!s.chars().any(|c| c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn uuid_like_monotonic_non_decreasing_under_rapid_calls() {
+        let a = uuid_like();
+        let b = uuid_like();
+        let c = uuid_like();
+        assert!(a <= b);
+        assert!(b <= c);
+    }
+
+    #[test]
+    fn uuid_like_only_hex_digits() {
+        assert!(uuid_like().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn uuid_like_starts_with_non_zero_nanos() {
+        // Nanos since epoch in 2026 → hex string not empty and not all zeros.
+        let s = uuid_like();
+        assert_ne!(s, "0");
+    }
+
+    #[test]
+    fn uuid_like_is_hex_parseable() {
+        let s = uuid_like();
+        assert!(u128::from_str_radix(&s, 16).is_ok());
+    }
+
+    #[test]
+    fn uuid_like_not_all_same_char() {
+        let s = uuid_like();
+        assert!(!s.chars().all(|c| c == s.chars().next().unwrap()));
+    }
+
+    #[test]
+    fn uuid_like_even_length() {
+        let s = uuid_like();
+        assert_eq!(s.len() % 2, 0);
+    }
+
+    #[test]
+    fn uuid_like_no_prefix_zeros_only() {
+        let s = uuid_like();
+        assert_ne!(s, "0000000000000000");
+    }
+
+    #[test]
+    fn uuid_like_hex_digit_count_matches_len() {
+        let s = uuid_like();
+        assert_eq!(s.chars().filter(|c| c.is_ascii_hexdigit()).count(), s.len());
+    }
+
+    #[test]
+    fn uuid_like_burst_samples_non_empty() {
+        for _ in 0..20 {
+            assert!(!uuid_like().is_empty());
+        }
+    }
+
+    #[test]
+    fn uuid_like_first_char_is_hex() {
+        let s = uuid_like();
+        assert!(s.chars().next().unwrap().is_ascii_hexdigit());
+    }
+
+    #[test]
+    fn uuid_like_last_char_is_hex() {
+        let s = uuid_like();
+        assert!(s.chars().last().unwrap().is_ascii_hexdigit());
+    }
+
+    #[test]
+    fn uuid_like_u128_roundtrip_order() {
+        let a = u128::from_str_radix(&uuid_like(), 16).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let b = u128::from_str_radix(&uuid_like(), 16).unwrap();
+        assert!(a < b);
+    }
+
+    #[test]
+    fn uuid_like_no_whitespace() {
+        let s = uuid_like();
+        assert!(!s.chars().any(|c| c.is_whitespace()));
+    }
+
+    #[test]
+    fn uuid_like_min_len_at_least_eight() {
+        assert!(uuid_like().len() >= 8);
+    }
+
+    #[test]
+    fn uuid_like_all_lowercase_or_digit() {
+        let s = uuid_like();
+        assert!(s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    }
+
+    #[test]
+    fn uuid_like_parseable_as_u128() {
+        assert!(u128::from_str_radix(&uuid_like(), 16).is_ok());
+    }
+
+    #[test]
+    fn uuid_like_not_empty_string() {
+        assert!(!uuid_like().is_empty());
+    }
+
+    #[test]
+    fn uuid_like_three_samples_monotonic() {
+        let a = uuid_like();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let b = uuid_like();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let c = uuid_like();
+        assert!(a <= b && b <= c);
+    }
+
+    #[test]
+    fn uuid_like_no_plus_or_minus() {
+        let s = uuid_like();
+        assert!(!s.contains('+') && !s.contains('-'));
+    }
+
+    #[test]
+    fn uuid_like_hex_only_chars() {
+        assert!(uuid_like().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn uuid_like_differs_from_zero_padded() {
+        assert_ne!(uuid_like(), "00000000000000000000000000000000");
+    }
 }
