@@ -367,4 +367,46 @@ mod tests {
         let b = uuid_like();
         assert!(a <= b);
     }
+
+    #[test]
+    fn uuid_like_len_at_least_sixteen() {
+        assert!(uuid_like().len() >= 16);
+    }
+
+    #[test]
+    fn uuid_like_lowercase_only() {
+        let s = uuid_like();
+        assert_eq!(s, s.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn uuid_like_parse_u128_nonzero() {
+        let n = u128::from_str_radix(&uuid_like(), 16).unwrap();
+        assert!(n > 0);
+    }
+
+    #[test]
+    fn uuid_like_three_samples_all_nonempty() {
+        let a = uuid_like();
+        let b = uuid_like();
+        let c = uuid_like();
+        assert!(!a.is_empty() && !b.is_empty() && !c.is_empty());
+    }
+
+    #[test]
+    fn uuid_like_hex_len_even() {
+        assert_eq!(uuid_like().len() % 2, 0);
+    }
+
+    #[test]
+    fn uuid_like_does_not_start_with_minus() {
+        assert!(!uuid_like().starts_with('-'));
+    }
+
+    #[test]
+    fn uuid_like_batch_all_parseable() {
+        for _ in 0..10 {
+            assert!(u128::from_str_radix(&uuid_like(), 16).is_ok());
+        }
+    }
 }

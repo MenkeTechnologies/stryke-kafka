@@ -538,4 +538,57 @@ mod tests {
         c.timeout_ms = 15_000;
         assert_eq!(c.build_config().unwrap().get("socket.timeout.ms"), Some("15000"));
     }
+
+    #[test]
+    fn build_config_sasl_username_password() {
+        let mut c = base_conn();
+        c.sasl_username = Some("u".into());
+        c.sasl_password = Some("p".into());
+        let cfg = c.build_config().unwrap();
+        assert_eq!(cfg.get("sasl.username"), Some("u"));
+        assert_eq!(cfg.get("sasl.password"), Some("p"));
+    }
+
+    #[test]
+    fn build_config_ssl_ca_location() {
+        let mut c = base_conn();
+        c.ssl_ca = Some("/etc/ca.pem".into());
+        assert_eq!(c.build_config().unwrap().get("ssl.ca.location"), Some("/etc/ca.pem"));
+    }
+
+    #[test]
+    fn timeout_one_second() {
+        let mut c = base_conn();
+        c.timeout_ms = 1_000;
+        assert_eq!(c.timeout(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn build_config_client_id_from_base_conn() {
+        assert_eq!(
+            base_conn().build_config().unwrap().get("client.id"),
+            Some("test-client"),
+        );
+    }
+
+    #[test]
+    fn build_config_extra_conf_overwrites_broker() {
+        let mut c = base_conn();
+        c.brokers = Some("a:9092".into());
+        c.extra_conf = vec!["bootstrap.servers=b:9092".into()];
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some("b:9092"),
+        );
+    }
+
+    #[test]
+    fn build_config_sasl_mechanism_scram() {
+        let mut c = base_conn();
+        c.sasl_mechanism = Some("SCRAM-SHA-512".into());
+        assert_eq!(
+            c.build_config().unwrap().get("sasl.mechanism"),
+            Some("SCRAM-SHA-512"),
+        );
+    }
 }
