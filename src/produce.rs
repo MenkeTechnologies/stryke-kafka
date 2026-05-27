@@ -73,6 +73,76 @@ fn parse_headers(kvs: &[String]) -> OwnedHeaders {
     headers
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdkafka::message::Headers;
+
+    #[test]
+    fn parse_headers_empty_input_yields_empty() {
+        let h = parse_headers(&[]);
+        assert_eq!(h.count(), 0);
+    }
+
+    #[test]
+    fn parse_headers_pairs_inserted_in_order() {
+        let h = parse_headers(&["a=1".into(), "b=two".into(), "c=3".into()]);
+        assert_eq!(h.count(), 3);
+        // Iteration order matches insertion in rdkafka's OwnedHeaders.
+        let h0 = h.get(0);
+        let h1 = h.get(1);
+        let h2 = h.get(2);
+        assert_eq!(h0.key, "a");
+        assert_eq!(h0.value, Some(b"1".as_ref()));
+        assert_eq!(h1.key, "b");
+        assert_eq!(h1.value, Some(b"two".as_ref()));
+        assert_eq!(h2.key, "c");
+    }
+
+    #[test]
+    fn parse_headers_malformed_silently_dropped() {
+        // No '=' → skipped (no error path).
+        let h = parse_headers(&["a=1".into(), "no-equals".into(), "b=2".into()]);
+        assert_eq!(h.count(), 2);
+        assert_eq!(h.get(0).key, "a");
+        assert_eq!(h.get(1).key, "b");
+    }
+
+    #[test]
+    fn parse_headers_value_with_equals_preserved() {
+        // First '=' splits — value can contain additional '='.
+        let h = parse_headers(&["jwt=a.b=c".into()]);
+        assert_eq!(h.count(), 1);
+        assert_eq!(h.get(0).key, "jwt");
+        assert_eq!(h.get(0).value, Some(b"a.b=c".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_empty_value_allowed() {
+        let h = parse_headers(&["k=".into()]);
+        assert_eq!(h.count(), 1);
+        assert_eq!(h.get(0).key, "k");
+        assert_eq!(h.get(0).value, Some(b"".as_ref()));
+    }
+
+    #[test]
+    fn parse_headers_binary_safe_bytes() {
+        // Non-ASCII bytes in the value pass through unchanged (UTF-8 here).
+        let h = parse_headers(&["msg=héllo".into()]);
+        assert_eq!(h.count(), 1);
+        assert_eq!(h.get(0).value, Some("héllo".as_bytes()));
+    }
+
+    #[test]
+    fn parse_headers_duplicate_keys_both_kept() {
+        // OwnedHeaders allows duplicate keys (Kafka spec permits it).
+        let h = parse_headers(&["k=1".into(), "k=2".into()]);
+        assert_eq!(h.count(), 2);
+        assert_eq!(h.get(0).value, Some(b"1".as_ref()));
+        assert_eq!(h.get(1).value, Some(b"2".as_ref()));
+    }
+}
+
 async fn send_one(
     producer: &FutureProducer,
     topic: &str,

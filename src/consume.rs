@@ -151,3 +151,33 @@ fn uuid_like() -> String {
         .unwrap_or(0);
     format!("{:x}", nanos)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_like_returns_lowercase_hex() {
+        let s = uuid_like();
+        assert!(!s.is_empty());
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())));
+    }
+
+    #[test]
+    fn uuid_like_two_calls_differ() {
+        // Nanosecond resolution should make consecutive calls distinct.
+        // Sleep a touch to be safe under fast clocks.
+        let a = uuid_like();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let b = uuid_like();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn uuid_like_length_reasonable() {
+        // u128 nanos since epoch in hex: ~14-16 chars in 2024-2030 range.
+        let s = uuid_like();
+        assert!(s.len() >= 8, "len = {} for {s}", s.len());
+        assert!(s.len() <= 32, "len = {} for {s}", s.len());
+    }
+}
