@@ -236,7 +236,7 @@ Kafka::ping          %opts → 1 | ""
 ```stryke
 Kafka::helper_path()    → $abs_path
 Kafka::ensure_built()   → $abs_path
-Kafka::version()        → "stryke-kafka-helper 0.1.0"
+Kafka::version()        → "stryke-kafka-helper 0.1.1"
 ```
 
 ## [0x05] Helper protocol
