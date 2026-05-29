@@ -427,4 +427,76 @@ mod tests {
             assert!(u128::from_str_radix(&uuid_like(), 16).is_ok());
         }
     }
+
+    // ─── clap parsing — ConsumeArgs defaults + required ─────────────────
+    // Pin the consumer's user-facing default values. Drift in
+    // offset_reset / idle_ms / value_mode / commit would silently change
+    // which messages are read, when polling stops, or whether offsets
+    // get committed back to the broker.
+
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct TestCli {
+        #[command(flatten)]
+        args: ConsumeArgs,
+    }
+
+    fn parse(args: &[&str]) -> Result<ConsumeArgs, clap::Error> {
+        let mut argv = vec!["stryke-kafka-helper"];
+        argv.extend_from_slice(args);
+        TestCli::try_parse_from(argv).map(|c| c.args)
+    }
+
+    #[test]
+    fn consume_topics_positional_required() {
+        let err = parse(&[]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn consume_offset_reset_defaults_latest() {
+        // Pin: matches docstring (`Default: latest`). A drift to
+        // `earliest` would replay the whole topic on every fresh
+        // group ID — surprising in production.
+        let a = parse(&["my-topic"]).expect("parse");
+        assert_eq!(a.offset_reset, "latest");
+    }
+
+    #[test]
+    fn consume_idle_ms_defaults_5000() {
+        // Pin: 5s idle = stop-when-empty default. Drift to longer
+        // would hang one-shot consumers; shorter would drop legitimate
+        // bursty workloads.
+        let a = parse(&["my-topic"]).expect("parse");
+        assert_eq!(a.idle_ms, 5_000);
+    }
+
+    #[test]
+    fn consume_value_mode_defaults_text() {
+        // Pin: text decoding is the read-friendly default. Drift to
+        // `binary` (base64) would surprise NDJSON consumers expecting
+        // raw strings.
+        let a = parse(&["my-topic"]).expect("parse");
+        assert_eq!(a.value_mode, "text");
+    }
+
+    #[test]
+    fn consume_commit_defaults_false() {
+        // Pin: bare `consume` is READ-ONLY. Drift to default-true
+        // would silently advance the consumer-group offset on each
+        // poll — catastrophic for dry-run inspections.
+        let a = parse(&["my-topic"]).expect("parse");
+        assert!(!a.commit);
+    }
+
+    #[test]
+    fn consume_group_optional_and_max_unbounded_by_default() {
+        let a = parse(&["my-topic"]).expect("parse");
+        assert!(
+            a.group.is_none(),
+            "group default = None (per-invocation UUID)"
+        );
+        assert!(a.max.is_none(), "max default = None (unbounded stream)");
+    }
 }
