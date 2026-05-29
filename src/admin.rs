@@ -55,9 +55,12 @@ pub async fn dispatch(conn: &KafkaConn, cmd: AdminCmd) -> Result<()> {
         AdminCmd::Groups => groups(conn),
         AdminCmd::Cluster => cluster(conn),
         AdminCmd::Lag { group, topic } => lag(conn, &group, topic.as_deref()),
-        AdminCmd::CreateTopic { name, partitions, replication, configs } => {
-            create_topic(conn, &name, partitions, replication, &configs).await
-        }
+        AdminCmd::CreateTopic {
+            name,
+            partitions,
+            replication,
+            configs,
+        } => create_topic(conn, &name, partitions, replication, &configs).await,
         AdminCmd::DeleteTopic { name } => delete_topic(conn, &name).await,
         AdminCmd::Ping => ping(conn),
     }
@@ -166,8 +169,10 @@ fn cluster(conn: &KafkaConn) -> Result<()> {
 
 fn lag(conn: &KafkaConn, group: &str, topic_filter: Option<&str>) -> Result<()> {
     let mut cfg = conn.build_config()?;
-    cfg.set("group.id", group).set("enable.auto.commit", "false");
-    let consumer: BaseConsumer<DefaultConsumerContext> = cfg.create().context("create consumer for lag")?;
+    cfg.set("group.id", group)
+        .set("enable.auto.commit", "false");
+    let consumer: BaseConsumer<DefaultConsumerContext> =
+        cfg.create().context("create consumer for lag")?;
 
     let md = consumer
         .fetch_metadata(topic_filter, conn.timeout())
@@ -221,7 +226,10 @@ fn lag(conn: &KafkaConn, group: &str, topic_filter: Option<&str>) -> Result<()> 
             }),
         )?;
     }
-    emit_ndjson_line(&mut out, &json!({ "group": group, "total_lag": grand_total }))?;
+    emit_ndjson_line(
+        &mut out,
+        &json!({ "group": group, "total_lag": grand_total }),
+    )?;
     Ok(())
 }
 
@@ -232,8 +240,10 @@ async fn create_topic(
     replication: i32,
     configs: &[String],
 ) -> Result<()> {
-    let admin: AdminClient<DefaultClientContext> =
-        conn.build_config()?.create().context("create AdminClient")?;
+    let admin: AdminClient<DefaultClientContext> = conn
+        .build_config()?
+        .create()
+        .context("create AdminClient")?;
     let mut new_topic = NewTopic::new(name, partitions, TopicReplication::Fixed(replication));
     for kv in configs {
         if let Some((k, v)) = kv.split_once('=') {
@@ -248,15 +258,19 @@ async fn create_topic(
     for r in results {
         match r {
             Ok(t) => emit_json(&json!({ "name": t, "created": true }))?,
-            Err((t, e)) => emit_json(&json!({ "name": t, "created": false, "error": format!("{e:?}") }))?,
+            Err((t, e)) => {
+                emit_json(&json!({ "name": t, "created": false, "error": format!("{e:?}") }))?
+            }
         }
     }
     Ok(())
 }
 
 async fn delete_topic(conn: &KafkaConn, name: &str) -> Result<()> {
-    let admin: AdminClient<DefaultClientContext> =
-        conn.build_config()?.create().context("create AdminClient")?;
+    let admin: AdminClient<DefaultClientContext> = conn
+        .build_config()?
+        .create()
+        .context("create AdminClient")?;
     let opts = AdminOptions::new().request_timeout(Some(conn.timeout()));
     let results = admin
         .delete_topics(&[name], &opts)
@@ -265,7 +279,9 @@ async fn delete_topic(conn: &KafkaConn, name: &str) -> Result<()> {
     for r in results {
         match r {
             Ok(t) => emit_json(&json!({ "name": t, "deleted": true }))?,
-            Err((t, e)) => emit_json(&json!({ "name": t, "deleted": false, "error": format!("{e:?}") }))?,
+            Err((t, e)) => {
+                emit_json(&json!({ "name": t, "deleted": false, "error": format!("{e:?}") }))?
+            }
         }
     }
     Ok(())

@@ -55,11 +55,7 @@ pub struct KafkaConn {
     pub timeout_ms: u64,
 
     /// Client.id reported to the broker.
-    #[arg(
-        long,
-        default_value = "stryke-kafka-helper",
-        global = true
-    )]
+    #[arg(long, default_value = "stryke-kafka-helper", global = true)]
     pub client_id: String,
 }
 
@@ -271,7 +267,10 @@ mod tests {
         let mut c = base_conn();
         c.brokers = Some("b1:9092,b2:9092,b3:9092".into());
         let cfg = c.build_config().unwrap();
-        assert_eq!(cfg.get("bootstrap.servers"), Some("b1:9092,b2:9092,b3:9092"));
+        assert_eq!(
+            cfg.get("bootstrap.servers"),
+            Some("b1:9092,b2:9092,b3:9092")
+        );
     }
 
     #[test]
@@ -292,7 +291,10 @@ mod tests {
     fn build_config_client_id_with_dots() {
         let mut c = base_conn();
         c.client_id = "app.prod.worker".into();
-        assert_eq!(c.build_config().unwrap().get("client.id"), Some("app.prod.worker"));
+        assert_eq!(
+            c.build_config().unwrap().get("client.id"),
+            Some("app.prod.worker")
+        );
     }
 
     #[test]
@@ -315,14 +317,20 @@ mod tests {
     fn build_config_extra_conf_empty_value() {
         let mut c = base_conn();
         c.extra_conf = vec!["allow.auto.create.topics=".into()];
-        assert_eq!(c.build_config().unwrap().get("allow.auto.create.topics"), Some(""));
+        assert_eq!(
+            c.build_config().unwrap().get("allow.auto.create.topics"),
+            Some("")
+        );
     }
 
     #[test]
     fn build_config_security_protocol_plaintext() {
         let mut c = base_conn();
         c.security_protocol = Some("PLAINTEXT".into());
-        assert_eq!(c.build_config().unwrap().get("security.protocol"), Some("PLAINTEXT"));
+        assert_eq!(
+            c.build_config().unwrap().get("security.protocol"),
+            Some("PLAINTEXT")
+        );
     }
 
     #[test]
@@ -338,14 +346,20 @@ mod tests {
     fn build_config_brokers_single_host() {
         let mut c = base_conn();
         c.brokers = Some("kafka:9092".into());
-        assert_eq!(c.build_config().unwrap().get("bootstrap.servers"), Some("kafka:9092"));
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some("kafka:9092")
+        );
     }
 
     #[test]
     fn build_config_extra_conf_overrides_bootstrap() {
         let mut c = base_conn();
         c.extra_conf = vec!["bootstrap.servers=override:9092".into()];
-        assert_eq!(c.build_config().unwrap().get("bootstrap.servers"), Some("override:9092"));
+        assert_eq!(
+            c.build_config().unwrap().get("bootstrap.servers"),
+            Some("override:9092")
+        );
     }
 
     #[test]
@@ -414,14 +428,20 @@ mod tests {
     fn build_config_ssl_key_password_only() {
         let mut c = base_conn();
         c.ssl_key_password = Some("pw".into());
-        assert_eq!(c.build_config().unwrap().get("ssl.key.password"), Some("pw"));
+        assert_eq!(
+            c.build_config().unwrap().get("ssl.key.password"),
+            Some("pw")
+        );
     }
 
     #[test]
     fn build_config_sasl_username_only() {
         let mut c = base_conn();
         c.sasl_username = Some("alice".into());
-        assert_eq!(c.build_config().unwrap().get("sasl.username"), Some("alice"));
+        assert_eq!(
+            c.build_config().unwrap().get("sasl.username"),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -462,7 +482,10 @@ mod tests {
     fn build_config_security_protocol_ssl() {
         let mut c = base_conn();
         c.security_protocol = Some("SSL".into());
-        assert_eq!(c.build_config().unwrap().get("security.protocol"), Some("SSL"));
+        assert_eq!(
+            c.build_config().unwrap().get("security.protocol"),
+            Some("SSL")
+        );
     }
 
     #[test]
@@ -484,7 +507,10 @@ mod tests {
     fn build_config_sasl_plain_mechanism() {
         let mut c = base_conn();
         c.sasl_mechanism = Some("PLAIN".into());
-        assert_eq!(c.build_config().unwrap().get("sasl.mechanism"), Some("PLAIN"));
+        assert_eq!(
+            c.build_config().unwrap().get("sasl.mechanism"),
+            Some("PLAIN")
+        );
     }
 
     #[test]
@@ -524,19 +550,28 @@ mod tests {
     fn build_config_ssl_key_password_set() {
         let mut c = base_conn();
         c.ssl_key_password = Some("pw".into());
-        assert_eq!(c.build_config().unwrap().get("ssl.key.password"), Some("pw"));
+        assert_eq!(
+            c.build_config().unwrap().get("ssl.key.password"),
+            Some("pw")
+        );
     }
 
     #[test]
     fn build_config_no_security_protocol_by_default() {
-        assert_eq!(base_conn().build_config().unwrap().get("security.protocol"), None);
+        assert_eq!(
+            base_conn().build_config().unwrap().get("security.protocol"),
+            None
+        );
     }
 
     #[test]
     fn build_config_socket_timeout_matches() {
         let mut c = base_conn();
         c.timeout_ms = 15_000;
-        assert_eq!(c.build_config().unwrap().get("socket.timeout.ms"), Some("15000"));
+        assert_eq!(
+            c.build_config().unwrap().get("socket.timeout.ms"),
+            Some("15000")
+        );
     }
 
     #[test]
@@ -553,7 +588,10 @@ mod tests {
     fn build_config_ssl_ca_location() {
         let mut c = base_conn();
         c.ssl_ca = Some("/etc/ca.pem".into());
-        assert_eq!(c.build_config().unwrap().get("ssl.ca.location"), Some("/etc/ca.pem"));
+        assert_eq!(
+            c.build_config().unwrap().get("ssl.ca.location"),
+            Some("/etc/ca.pem")
+        );
     }
 
     #[test]

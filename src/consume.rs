@@ -56,13 +56,21 @@ pub async fn run(conn: &KafkaConn, args: ConsumeArgs) -> Result<()> {
     let mut cfg = conn.build_config()?;
     cfg.set("group.id", &group)
         .set("auto.offset.reset", &args.offset_reset)
-        .set("enable.auto.commit", if args.commit { "true" } else { "false" })
+        .set(
+            "enable.auto.commit",
+            if args.commit { "true" } else { "false" },
+        )
         .set("enable.partition.eof", "false")
         .set_log_level(RDKafkaLogLevel::Warning);
 
     let consumer: BaseConsumer<DefaultConsumerContext> = cfg.create().context("create consumer")?;
 
-    let topics: Vec<&str> = args.topics.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let topics: Vec<&str> = args
+        .topics
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if topics.is_empty() {
         anyhow::bail!("at least one topic required");
     }
@@ -130,8 +138,14 @@ pub async fn run(conn: &KafkaConn, args: ConsumeArgs) -> Result<()> {
                 count += 1;
                 if args.commit {
                     let mut tpl = TopicPartitionList::new();
-                    tpl.add_partition_offset(msg.topic(), msg.partition(), Offset::Offset(msg.offset() + 1))?;
-                    consumer.commit(&tpl, rdkafka::consumer::CommitMode::Async).ok();
+                    tpl.add_partition_offset(
+                        msg.topic(),
+                        msg.partition(),
+                        Offset::Offset(msg.offset() + 1),
+                    )?;
+                    consumer
+                        .commit(&tpl, rdkafka::consumer::CommitMode::Async)
+                        .ok();
                 }
                 if args.max.is_some_and(|l| count >= l) {
                     break;
@@ -160,7 +174,9 @@ mod tests {
     fn uuid_like_returns_lowercase_hex() {
         let s = uuid_like();
         assert!(!s.is_empty());
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())));
     }
 
     #[test]
@@ -279,7 +295,9 @@ mod tests {
     #[test]
     fn uuid_like_all_lowercase_or_digit() {
         let s = uuid_like();
-        assert!(s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
     }
 
     #[test]
