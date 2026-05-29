@@ -538,4 +538,154 @@ mod tests {
         assert_eq!(h.get(0).key, "");
         assert_eq!(h.get(0).value, Some(b"onlyvalue".as_slice()));
     }
+
+    // ─── clap parsing — ProduceCmd subcommand routing ──────────────────
+    // Previous rounds pinned ConsumeArgs defaults + AdminCmd routing.
+    // ProduceCmd had only parse_headers helper coverage; the clap surface
+    // — Send required topic+value, Stream defaults (ack_timeout_ms=10000,
+    // limit None), --partition optional, --header repeatable — was
+    // untested.
+
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct TestProduceCli {
+        #[command(subcommand)]
+        cmd: ProduceCmd,
+    }
+
+    fn parse_produce(args: &[&str]) -> Result<ProduceCmd, clap::Error> {
+        let mut argv = vec!["stryke-kafka-helper"];
+        argv.extend_from_slice(args);
+        TestProduceCli::try_parse_from(argv).map(|c| c.cmd)
+    }
+
+    #[test]
+    fn produce_send_requires_topic_and_value_flag() {
+        // Pin: clap rejects send without topic positional or --value.
+        // Drift would let an empty produce reach librdkafka and timeout.
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_produce(&["send"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_produce(&["send", "events"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        let cmd = parse_produce(&["send", "events", "--value", "hello"]).expect("parse");
+        match cmd {
+            ProduceCmd::Send {
+                topic,
+                value,
+                key,
+                headers,
+                partition,
+            } => {
+                assert_eq!(topic, "events");
+                assert_eq!(value, "hello");
+                assert!(key.is_none());
+                assert!(headers.is_empty());
+                assert!(partition.is_none(), "partition None = librdkafka picks");
+            }
+            _ => panic!("expected Send"),
+        }
+    }
+
+    #[test]
+    fn produce_send_repeatable_headers_collect_into_vec() {
+        // Pin: --header k=v is repeatable. Drift to last-wins would
+        // silently drop tracing/auth headers on each Send.
+        let cmd = parse_produce(&[
+            "send",
+            "events",
+            "--value",
+            "x",
+            "--header",
+            "a=1",
+            "--header",
+            "b=2",
+            "--key",
+            "k1",
+            "--partition",
+            "3",
+        ])
+        .expect("parse");
+        match cmd {
+            ProduceCmd::Send {
+                headers,
+                key,
+                partition,
+                ..
+            } => {
+                assert_eq!(headers, vec!["a=1", "b=2"]);
+                assert_eq!(key.as_deref(), Some("k1"));
+                assert_eq!(partition, Some(3));
+            }
+            _ => panic!("expected Send"),
+        }
+    }
+
+    #[test]
+    fn produce_stream_defaults_ack_timeout_10s_and_no_limit() {
+        // Pin: --ack-timeout-ms defaults 10_000 (10s — the librdkafka
+        // recommended ack window). --limit unset = stream forever.
+        let cmd = parse_produce(&["stream"]).expect("parse");
+        match cmd {
+            ProduceCmd::Stream {
+                default_topic,
+                ack_timeout_ms,
+                limit,
+            } => {
+                assert!(default_topic.is_none());
+                assert_eq!(ack_timeout_ms, 10_000);
+                assert!(limit.is_none());
+            }
+            _ => panic!("expected Stream"),
+        }
+    }
+
+    #[test]
+    fn produce_stream_optional_flags_thread_through() {
+        // Pin: --default-topic Some(_), --ack-timeout-ms override,
+        // --limit Some(N). Drift here would silently bound or unbound
+        // streaming runs against operator intent.
+        let cmd = parse_produce(&[
+            "stream",
+            "--default-topic",
+            "fallback",
+            "--ack-timeout-ms",
+            "500",
+            "--limit",
+            "1000",
+        ])
+        .expect("parse");
+        match cmd {
+            ProduceCmd::Stream {
+                default_topic,
+                ack_timeout_ms,
+                limit,
+            } => {
+                assert_eq!(default_topic.as_deref(), Some("fallback"));
+                assert_eq!(ack_timeout_ms, 500);
+                assert_eq!(limit, Some(1000));
+            }
+            _ => panic!("expected Stream"),
+        }
+    }
+
+    #[test]
+    fn produce_partition_negative_allowed_partition_value_is_i32() {
+        // Pin: --partition is i32. Negative values are accepted at clap
+        // level (validation against actual partition count is broker-side).
+        // Drift to u32 would silently reject -1 (= "let broker pick").
+        // Use `--partition=-1` form: clap rejects leading-hyphen as a
+        // bare flag argument; the `=` form binds it without ambiguity.
+        let cmd =
+            parse_produce(&["send", "events", "--value", "x", "--partition=-1"]).expect("parse");
+        match cmd {
+            ProduceCmd::Send { partition, .. } => assert_eq!(partition, Some(-1)),
+            _ => panic!("expected Send"),
+        }
+    }
 }
