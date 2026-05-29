@@ -489,4 +489,53 @@ mod tests {
         assert_eq!(h.get(0).key, "a");
         assert_eq!(h.get(1).key, "b");
     }
+
+    // ─── parse_headers edge-case pins ────────────────────────────────
+    //
+    // Kafka headers commonly carry tracing IDs (`traceparent=...`),
+    // empty markers (`retry=`), and JWT-shaped values (multi-`=`).
+    // Pin those shapes so a tightening of the parser (e.g. switching
+    // from `split_once` to `splitn`) doesn't silently drop them.
+
+    #[test]
+    fn parse_headers_empty_value_is_emitted_not_dropped() {
+        // `flag=` → header with key=`flag`, value=`b""`. Empty values
+        // are semantically distinct from "no header set" and must
+        // round-trip.
+        let h = parse_headers(&["flag=".into()]);
+        assert_eq!(h.get(0).key, "flag");
+        assert_eq!(h.get(0).value, Some(b"".as_slice()));
+    }
+
+    #[test]
+    fn parse_headers_value_with_multiple_equals_keeps_full_value() {
+        // JWT / base64 / `k=v;k2=v2` values have inner `=` chars;
+        // splitting on the first `=` is the documented contract.
+        let h = parse_headers(&["jwt=eyJhbGciOiJIUzI1NiJ9.payload.sig".into()]);
+        assert_eq!(h.get(0).key, "jwt");
+        assert_eq!(
+            h.get(0).value,
+            Some(b"eyJhbGciOiJIUzI1NiJ9.payload.sig".as_slice())
+        );
+    }
+
+    #[test]
+    fn parse_headers_no_equals_bareword_is_dropped() {
+        // A bareword like `oops` (no `=`) has no value half — the
+        // documented behavior is silent drop; pin it so a future
+        // panic-on-bad-input change is intentional.
+        let h = parse_headers(&["oops".into(), "ok=1".into()]);
+        // Only `ok=1` makes it in; the bareword is gone.
+        assert_eq!(h.get(0).key, "ok");
+    }
+
+    #[test]
+    fn parse_headers_empty_key_with_value_is_emitted() {
+        // `=v` → key="", value=b"v". Kafka allows zero-length keys;
+        // dropping these would break interop with brokers that send
+        // them in transactional metadata.
+        let h = parse_headers(&["=onlyvalue".into()]);
+        assert_eq!(h.get(0).key, "");
+        assert_eq!(h.get(0).value, Some(b"onlyvalue".as_slice()));
+    }
 }
