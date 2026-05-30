@@ -236,7 +236,7 @@ Kafka::ping          %opts → 1 | ""
 ```stryke
 Kafka::helper_path()    → $abs_path
 Kafka::ensure_built()   → $abs_path
-Kafka::version()        → "stryke-kafka-helper 0.1.1"
+Kafka::version()        → "stryke-kafka-helper X.Y.Z"
 ```
 
 ## [0x05] Helper protocol
@@ -262,10 +262,10 @@ Output:
 
 ```sh
 cargo test                                          # compiles, no live calls
-KAFKA_BROKERS=localhost:9092 s test t/              # 7-test live round-trip
+KAFKA_BROKERS=localhost:9092 s test t/              # live round-trip
 ```
 
-The end-to-end suite creates a temp topic, produces 6 messages (1 + 5 bulk),
+The end-to-end suite creates a temp topic, produces single + bulk messages,
 consumes them back, checks the count, and deletes the topic. Skips cleanly
 when `$KAFKA_BROKERS` isn't set or the broker isn't reachable.
 
@@ -312,7 +312,7 @@ stryke-kafka/
     kafka.stk                      # `kafka` CLI
     kafka-build.stk
   t/
-    test_kafka.stk                 # 7-test live round-trip
+    test_kafka.stk                 # live round-trip
   examples/
     produce_one.stk
     tail_topic.stk
