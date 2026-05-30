@@ -26,7 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cmake (for librdkafka build)
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
       - run: cargo check --all-targets --locked
 
   fmt:
@@ -47,6 +47,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Install librdkafka build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
 
@@ -66,7 +68,7 @@ jobs:
       - name: Install cmake
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev pkg-config
+            sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
           fi
       - run: cargo test --locked --no-fail-fast
 
@@ -105,7 +107,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
 
       - run: cargo build --release --locked
 
@@ -148,7 +150,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
       - env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked
@@ -176,7 +178,7 @@ jobs:
       - name: Install cmake
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev pkg-config
+            sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
           fi
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v6
