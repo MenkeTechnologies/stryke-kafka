@@ -1,20 +1,20 @@
-# lib/Kafka.stk — Apache Kafka client for stryke (`use Kafka`).
-#
-# Thin wrapper around the `stryke-kafka` cdylib's `kafka__*` exports.
-# The cdylib is dlopened in-process on first `use Kafka` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh
-# producer/admin client per call — defeated batching/compression). The
-# cdylib holds one shared tokio runtime + a FutureProducer cache per
-# brokers tuple. Producer batching now works as designed.
-#
-# v0.2.0 surface: 11 core ops (ping/cluster/topics/describe/groups,
-# produce/produce_many, consume snapshot, create_topic/delete_topic).
-# Streaming consume (long-running consumer-group with callback) is
-# deferred — needs a callback FFI shape that v1's `FfiSig::StrToStr`
-# doesn't model.
+## lib/Kafka.stk — Apache Kafka client for stryke (`use Kafka`).
+##
+## Thin wrapper around the `stryke-kafka` cdylib's `kafka__*` exports.
+## The cdylib is dlopened in-process on first `use Kafka` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh
+## producer/admin client per call — defeated batching/compression). The
+## cdylib holds one shared tokio runtime + a FutureProducer cache per
+## brokers tuple. Producer batching now works as designed.
+##
+## v0.2.0 surface: 11 core ops (ping/cluster/topics/describe/groups,
+## produce/produce_many, consume snapshot, create_topic/delete_topic).
+## Streaming consume (long-running consumer-group with callback) is
+## deferred — needs a callback FFI shape that v1's `FfiSig::StrToStr`
+## doesn't model.
 
 package Kafka
 
@@ -66,8 +66,8 @@ fn Kafka::groups (%opts) {
     @{ $o->{groups} }
 }
 
-# Lag computation is deferred — derive client-side from groups + topic
-# metadata if needed.
+## Lag computation is deferred — derive client-side from groups + topic
+## metadata if needed.
 fn Kafka::lag ($group, %opts) {
     die "Kafka::lag: dedicated lag op deferred in v0.2.0 cdylib"
 }
@@ -80,7 +80,7 @@ fn Kafka::produce ($topic, $value, %opts) {
     Kafka::_decode("produce", kafka__produce(to_json($r)))
 }
 
-# $rows: arrayref of { value, key? } hashrefs.
+## $rows: arrayref of { value, key? } hashrefs.
 fn Kafka::produce_many ($rows, %opts) {
     die "Kafka::produce_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
     die "Kafka::produce_many: topic => 'name' required" unless defined $opts{topic}
@@ -99,7 +99,7 @@ fn Kafka::consume ($topic, %opts) {
     @{ $o->{messages} }
 }
 
-# Streaming consume snapshot + per-message callback.
+## Streaming consume snapshot + per-message callback.
 fn Kafka::consume_stream ($topic, %opts) {
     die "Kafka::consume_stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
