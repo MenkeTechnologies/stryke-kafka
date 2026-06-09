@@ -20,6 +20,7 @@ package Kafka
 
 # ── error dispatch ────────────────────────────────────────────────────
 
+## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Kafka::_decode ($name, $json) {
     my $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
@@ -28,6 +29,7 @@ fn Kafka::_decode ($name, $json) {
     $o
 }
 
+## Build the FFI request hash by merging the caller's connection opts.
 fn Kafka::_req ($extra, $opts) {
     my %r = %$extra
     $r{brokers} = $opts->{brokers} if exists $opts->{brokers} && defined $opts->{brokers}
@@ -36,10 +38,12 @@ fn Kafka::_req ($extra, $opts) {
 
 # ── version + ping ──────────────────────────────────────────────────
 
+## Return the package version string.
 fn Kafka::version {
     Kafka::_decode("pkg_version", kafka__pkg_version("{}"))->{version}
 }
 
+## Connectivity probe — returns 1 on success, 0 on failure.
 fn Kafka::ping (%opts) {
     Kafka::_decode("ping",
         kafka__ping(to_json(Kafka::_req({}, \%opts))))->{ok} ? 1 : 0
@@ -47,20 +51,24 @@ fn Kafka::ping (%opts) {
 
 # ── cluster + metadata ──────────────────────────────────────────────
 
+## Cluster snapshot: brokers, topic count.
 fn Kafka::cluster (%opts) {
     Kafka::_decode("cluster", kafka__cluster(to_json(Kafka::_req({}, \%opts))))
 }
 
+## List topic names.
 fn Kafka::topics (%opts) {
     my $o = Kafka::_decode("topics", kafka__topics(to_json(Kafka::_req({}, \%opts))))
     @{ $o->{topics} }
 }
 
+## Per-partition leader/replicas/ISR for $topic.
 fn Kafka::describe ($topic, %opts) {
     Kafka::_decode("describe",
         kafka__describe(to_json(Kafka::_req({ topic => $topic }, \%opts))))
 }
 
+## List consumer groups + state/protocol/members.
 fn Kafka::groups (%opts) {
     my $o = Kafka::_decode("groups", kafka__groups(to_json(Kafka::_req({}, \%opts))))
     @{ $o->{groups} }
@@ -74,6 +82,7 @@ fn Kafka::lag ($group, %opts) {
 
 # ── produce ─────────────────────────────────────────────────────────
 
+## Send one record; returns { topic, partition, offset }.
 fn Kafka::produce ($topic, $value, %opts) {
     my $r = Kafka::_req(
         { topic => $topic, value => $value, key => $opts{key} }, \%opts)
@@ -90,6 +99,7 @@ fn Kafka::produce_many ($rows, %opts) {
 
 # ── consume (snapshot) ──────────────────────────────────────────────
 
+## Snapshot pull up to `limit` messages within `timeout_ms`.
 fn Kafka::consume ($topic, %opts) {
     my $r = Kafka::_req(
         { topic => $topic, limit => $opts{limit}, timeout_ms => $opts{timeout_ms}, group => $opts{group} },
@@ -114,6 +124,7 @@ fn Kafka::consume_stream ($topic, %opts) {
 
 # ── topic admin ─────────────────────────────────────────────────────
 
+## Create topic; opts: partitions, replication.
 fn Kafka::create_topic ($name, %opts) {
     my $r = Kafka::_req(
         { name => $name, partitions => $opts{partitions}, replication => $opts{replication} },
@@ -122,6 +133,7 @@ fn Kafka::create_topic ($name, %opts) {
     Kafka::_decode("create_topic", kafka__create_topic(to_json($r)))
 }
 
+## Delete topic by name.
 fn Kafka::delete_topic ($name, %opts) {
     Kafka::_decode("delete_topic",
         kafka__delete_topic(to_json(Kafka::_req({ name => $name }, \%opts))))
