@@ -139,4 +139,3 @@ fn Kafka::delete_topic ($name, %opts) {
         kafka__delete_topic(to_json(Kafka::_req({ name => $name }, \%opts))))
 }
 
-1
