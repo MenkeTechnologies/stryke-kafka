@@ -447,3 +447,82 @@ pub extern "C" fn kafka__create_topic(args: *const c_char) -> *const c_char {
 pub extern "C" fn kafka__delete_topic(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_delete_topic)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var("KAFKA_BROKERS").ok();
+        std::env::remove_var("KAFKA_BROKERS");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match saved {
+            Some(s) => std::env::set_var("KAFKA_BROKERS", s),
+            None => std::env::remove_var("KAFKA_BROKERS"),
+        }
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+    }
+
+    #[test]
+    fn brokers_opts_string_wins() {
+        with_env(|| {
+            std::env::set_var("KAFKA_BROKERS", "from-env:9092");
+            assert_eq!(
+                brokers_from_opts(&json!({"brokers": "from-opts:9092"})),
+                "from-opts:9092"
+            );
+        });
+    }
+
+    #[test]
+    fn brokers_falls_back_to_env() {
+        with_env(|| {
+            std::env::set_var("KAFKA_BROKERS", "env-host:9092");
+            assert_eq!(brokers_from_opts(&json!({})), "env-host:9092");
+        });
+    }
+
+    #[test]
+    fn brokers_default_when_unset() {
+        with_env(|| {
+            assert_eq!(brokers_from_opts(&json!({})), "127.0.0.1:9092");
+        });
+    }
+
+    #[test]
+    fn brokers_ignores_non_string_opts() {
+        with_env(|| {
+            // `{"brokers": 9092}` shouldn't stringify the integer.
+            assert_eq!(
+                brokers_from_opts(&json!({"brokers": 9092})),
+                "127.0.0.1:9092"
+            );
+        });
+    }
+
+    #[test]
+    fn base_config_sets_bootstrap_servers() {
+        let cfg = base_config("host-a:9092,host-b:9092");
+        assert_eq!(
+            cfg.get("bootstrap.servers"),
+            Some("host-a:9092,host-b:9092")
+        );
+    }
+
+    #[test]
+    fn base_config_creates_clean_per_call() {
+        // Two calls must yield independent configs so consumer-vs-producer
+        // overrides (`enable.auto.commit`, `message.timeout.ms`) on one
+        // don't bleed into the other.
+        let mut a = base_config("h:1");
+        a.set("enable.auto.commit", "false");
+        let b = base_config("h:1");
+        assert_eq!(b.get("enable.auto.commit"), None);
+    }
+}
