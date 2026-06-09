@@ -4,15 +4,15 @@
 
 use Kafka
 
-my $group = $ARGV[0]
+val $group = $ARGV[0]
 die "usage: group_lag.stk GROUP [TOPIC]\n" unless defined $group
 
-my %opts
+var %opts
 $opts{topic} = $ARGV[1] if defined $ARGV[1]
 
-my @rows = Kafka::lag $group, %opts
-my $total = 0
-for my $r (@rows) {
+val @rows = Kafka::lag $group, %opts
+var $total = 0
+for val $r (@rows) {
     if (defined $r->{total_lag}) {
         $total = $r->{total_lag}
         next

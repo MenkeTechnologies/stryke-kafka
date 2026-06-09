@@ -6,7 +6,7 @@
 
 use Kafka
 
-my $have_cdylib = eval { Kafka::version(); 1 }
+val $have_cdylib = eval { Kafka::version(); 1 }
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
@@ -20,12 +20,12 @@ unless (eval { Kafka::ping() }) {
     exit 0
 }
 
-my $topic = "stryke-kafka-test-$$"
+val $topic = "stryke-kafka-test-$$"
 p "1..7"
-my $i = 0
+var $i = 0
 
 # 1. cluster metadata
-my $cl
+var $cl
 eval { $cl = Kafka::cluster() }
 $i++
 p $@ ? "not ok $i - cluster: $@" :
@@ -33,7 +33,7 @@ p $@ ? "not ok $i - cluster: $@" :
         "not ok $i - cluster broker_count=0")
 
 # 2. create topic
-my $c
+var $c
 eval { $c = Kafka::create_topic($topic, partitions => 2, replication => 1) }
 $i++
 p $@ ? "not ok $i - create_topic: $@" :
@@ -41,14 +41,14 @@ p $@ ? "not ok $i - create_topic: $@" :
         "not ok $i - create_topic: $c->{error}")
 
 # 3. topics list (find ours)
-my @tlist
+var @tlist
 eval { @tlist = Kafka::topics() }
 $i++
 if ($@) {
     p "not ok $i - topics: $@"
 } else {
-    my $found = 0
-    for my $t (@tlist) {
+    var $found = 0
+    for val $t (@tlist) {
         $found = 1 if $t->{name} eq $topic
     }
     p ($found ? "ok $i - topics (found $topic)"
@@ -56,7 +56,7 @@ if ($@) {
 }
 
 # 4. produce one
-my $r
+var $r
 eval { $r = Kafka::produce($topic, "hello-stryke", key => "k1") }
 $i++
 p $@ ? "not ok $i - produce: $@" :
@@ -64,7 +64,7 @@ p $@ ? "not ok $i - produce: $@" :
         "not ok $i - produce bad shape")
 
 # 5. produce_many
-my $rm
+var $rm
 eval {
     $rm = Kafka::produce_many(
         [ map { { topic => $topic, value => "msg-$_", key => "k$_" } } (1:5) ]
@@ -76,7 +76,7 @@ p $@ ? "not ok $i - produce_many: $@" :
         "not ok $i - produce_many sent=$rm->{sent}")
 
 # 6. consume back (from beginning)
-my @msgs
+var @msgs
 eval {
     @msgs = Kafka::consume(
         $topic,
