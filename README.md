@@ -55,10 +55,18 @@ glibc / musl / macOS without depending on a system `libkafka.so`.
 
 ## [0x01] Install
 
+From a release (no rustc + librdkafka build on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-kafka
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-kafka
 cargo build --release            # first build compiles librdkafka via cmake (~3-5 min)
-s pkg install -g .               # installs `kafka` and `kafka-build` CLIs
+s pkg install -g .               # cdylib lands in ~/.stryke/store/kafka@<version>/
 ```
 
 Or:
@@ -67,8 +75,11 @@ Or:
 make install
 ```
 
-The first build is the slow one — subsequent builds reuse the cached
-librdkafka archive.
+The cdylib is dlopened in-process on first `use Kafka`. A shared tokio
+runtime + `FutureProducer` cache per brokers tuple is held in `OnceCell`
+— producer batching/compression now works as designed (the v1 helper's
+fork-per-call defeated it). The first build is the slow one; subsequent
+builds reuse the cached librdkafka archive.
 
 ## [0x02] Quick start
 

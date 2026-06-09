@@ -9,7 +9,7 @@ help:
 	  '  make release   - cargo build --release  (first run compiles librdkafka via cmake, ~3-5 min)' \
 	  '  make debug     - cargo build' \
 	  '  make test      - cargo test then `s test t/`  (needs $$KAFKA_BROKERS for live tests)' \
-	  '  make install   - `s pkg install -g .` (registers kafka/kafka-build CLI launchers)' \
+	  '  make install   - `s pkg install -g .` (cdylib lands in ~/.stryke/store/kafka@<ver>/)' \
 	  '  make clean     - cargo clean'
 
 release:

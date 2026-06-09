@@ -1,37 +1,34 @@
 [package]
-name = "stryke-kafka-helper"
-version = "0.1.1"
+name = "stryke-kafka"
+version = "0.2.0"
 edition = "2021"
-description = "Apache Kafka bridge binary for the stryke `kafka` package"
+description = "Apache Kafka cdylib for stryke. Dlopened in-process with a persistent FutureProducer + admin client per (brokers) tuple."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-kafka"
 homepage = "https://menketechnologies.github.io/stryke-kafka/"
 publish = false
 
-[[bin]]
-name = "stryke-kafka-helper"
-path = "src/main.rs"
+[lib]
+name = "stryke_kafka"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
 
 [dependencies]
-# `cmake-build` makes the binary self-contained by compiling librdkafka
+# `cmake-build` makes the cdylib self-contained by compiling librdkafka
 # from source rather than relying on a system .so. Adds ~3-5 minutes to a
 # first build; subsequent builds reuse the cached static archive.
-# `ssl-vendored` and `gssapi` are off — keep the dep tree slim. Users
-# needing them can fork the package and flip features.
 rdkafka = { version = "0.39", default-features = false, features = [
     "cmake-build", "libz", "tokio",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "fs", "time", "signal"] }
-clap = { version = "4", default-features = false, features = [
-    "std", "derive", "help", "usage", "error-context", "env",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
-base64 = "0.22"
 indexmap = "2"
 futures = "0.3"
+once_cell = "1"
+parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3

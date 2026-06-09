@@ -1,336 +1,130 @@
-# lib/Kafka.stk — Apache Kafka client for stryke.
+# lib/Kafka.stk — Apache Kafka client for stryke (`use Kafka`).
 #
-# Wraps the `stryke-kafka-helper` Rust binary (rdkafka + librdkafka,
-# cmake-built statically). Output is JSON / NDJSON over the helper's
-# stdout.
+# Thin wrapper around the `stryke-kafka` cdylib's `kafka__*` exports.
+# The cdylib is dlopened in-process on first `use Kafka` (see stryke's
+# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+# stryke-callable function via `rust_ffi::load_cdylib`.
 #
-# Connection options every public fn understands (hashref-internal to
-# work around the stryke %opts-reslurp issue):
-#   brokers          $KAFKA_BROKERS                (required)
-#   security_protocol $KAFKA_SECURITY_PROTOCOL     PLAINTEXT|SSL|SASL_*
-#   sasl_mechanism   $KAFKA_SASL_MECHANISM          PLAIN|SCRAM-SHA-256|...
-#   sasl_username    $KAFKA_SASL_USERNAME
-#   sasl_password    $KAFKA_SASL_PASSWORD
-#   ssl_ca / ssl_cert / ssl_key / ssl_key_password
-#   client_id        default: "stryke-kafka-helper"
-#   timeout_ms       default: 10000
-#   extra_conf       arrayref of "k=v" librdkafka overrides
+# Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh
+# producer/admin client per call — defeated batching/compression). The
+# cdylib holds one shared tokio runtime + a FutureProducer cache per
+# brokers tuple. Producer batching now works as designed.
+#
+# v0.2.0 surface: 11 core ops (ping/cluster/topics/describe/groups,
+# produce/produce_many, consume snapshot, create_topic/delete_topic).
+# Streaming consume (long-running consumer-group with callback) is
+# deferred — needs a callback FFI shape that v1's `FfiSig::StrToStr`
+# doesn't model.
 
 package Kafka
 
-our $HELPER
+# ── error dispatch ────────────────────────────────────────────────────
 
-fn Kafka::pkg_root {
-    my @parts = split "/", __FILE__
-    pop @parts
-    pop @parts
-    my $root = join "/", @parts
-    $root ne "" ? $root : "."
+fn Kafka::_decode ($name, $json) {
+    my $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "Kafka::$name: $o->{error}"
+    }
+    $o
 }
 
-fn Kafka::helper_path {
-    return $Kafka::HELPER if defined $Kafka::HELPER && -x $Kafka::HELPER
-
-    if (exists $ENV{STRYKE_KAFKA_HELPER} && $ENV{STRYKE_KAFKA_HELPER} ne "") {
-        my $p = $ENV{STRYKE_KAFKA_HELPER}
-        die "stryke-kafka: STRYKE_KAFKA_HELPER=$p is not an executable file" unless -x $p
-        $Kafka::HELPER = $p
-        return $p
-    }
-
-    my $root = Kafka::pkg_root()
-    for my $cand (
-        "$root/target/release/stryke-kafka-helper",
-        "$root/target/debug/stryke-kafka-helper",
-        "$root/bin/stryke-kafka-helper",
-    ) {
-        if (-x $cand) {
-            $Kafka::HELPER = $cand
-            return $cand
-        }
-    }
-
-    my $which = qx{command -v stryke-kafka-helper 2>/dev/null}
-    chomp $which
-    if ($which ne "" && -x $which) {
-        $Kafka::HELPER = $which
-        return $which
-    }
-
-    die "stryke-kafka: helper binary not found.\n" .
-        "  Build it once with:  cd $root && cargo build --release\n" .
-        "  Or set STRYKE_KAFKA_HELPER=/path/to/stryke-kafka-helper\n"
+fn Kafka::_req ($extra, $opts) {
+    my %r = %$extra
+    $r{brokers} = $opts->{brokers} if exists $opts->{brokers} && defined $opts->{brokers}
+    \%r
 }
 
-fn Kafka::ensure_built {
-    my $root = Kafka::pkg_root()
-    for my $cand ("$root/target/release/stryke-kafka-helper",
-                  "$root/target/debug/stryke-kafka-helper") {
-        return $cand if -x $cand
-    }
-    return Kafka::helper_path() if exists $ENV{STRYKE_KAFKA_HELPER}
-
-    p "stryke-kafka: building helper (cargo build --release)..."
-    my $rc = system "cd " . Kafka::_shq($root) . " && cargo build --release"
-    die "stryke-kafka: cargo build failed (rc=$rc)" if $rc != 0
-    Kafka::helper_path()
-}
-
-fn Kafka::_shq ($s) {
-    my $t = $s
-    $t =~ s/'/'\\''/g
-    "'$t'"
-}
-
-# Helper + global connection flags. $o hashref.
-fn Kafka::_conn_argv ($o) {
-    my @argv = (Kafka::_shq(Kafka::helper_path()))
-
-    my $brokers = $o->{brokers} // $ENV{KAFKA_BROKERS}
-    if (defined $brokers && $brokers ne "") {
-        push @argv, "--brokers", Kafka::_shq($brokers)
-    }
-    for my $pair (
-        [security_protocol => "--security-protocol"],
-        [sasl_mechanism    => "--sasl-mechanism"],
-        [sasl_username     => "--sasl-username"],
-        [sasl_password     => "--sasl-password"],
-        [ssl_ca            => "--ssl-ca"],
-        [ssl_cert          => "--ssl-cert"],
-        [ssl_key           => "--ssl-key"],
-        [ssl_key_password  => "--ssl-key-password"],
-        [client_id         => "--client-id"],
-        [timeout_ms        => "--timeout-ms"],
-    ) {
-        my ($k, $flag) = @$pair
-        if (defined $o->{$k}) {
-            push @argv, $flag, Kafka::_shq($o->{$k})
-        }
-    }
-    if (defined $o->{extra_conf} && ref($o->{extra_conf}) eq "ARRAY") {
-        for my $kv (@{ $o->{extra_conf} }) {
-            push @argv, "-X", Kafka::_shq($kv)
-        }
-    }
-    @argv
-}
-
-fn Kafka::_drain_ndjson ($fh) {
-    my @rows
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        push @rows, from_json $line
-    }
-    @rows
-}
-
-fn Kafka::_run_ndjson ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_KAFKA_DEBUG}) {
-        warn "DEBUG kafka cmd: $cmd\n"
-    }
-    open my $fh, "-|", $cmd or die "stryke-kafka: spawn failed: $!"
-    my @rows = Kafka::_drain_ndjson $fh
-    close $fh or die "stryke-kafka: helper exited ($?)"
-    @rows
-}
-
-fn Kafka::_run_json ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_KAFKA_DEBUG}) {
-        warn "DEBUG kafka cmd: $cmd\n"
-    }
-    my $out = qx{$cmd}
-    die "stryke-kafka: helper exited ($?)" if $? != 0
-    # Take the last JSON-shaped line (ignore stderr-style noise that may
-    # leak through on stdout from librdkafka).
-    my $payload
-    for my $line (split /\n/, $out) {
-        next unless $line =~ /^[{\[]/
-        $payload = $line
-    }
-    die "stryke-kafka: helper produced no JSON output" unless defined $payload
-    from_json $payload
-}
+# ── version + ping ──────────────────────────────────────────────────
 
 fn Kafka::version {
-    my $bin = Kafka::_shq(Kafka::helper_path())
-    my $v = qx{$bin --version 2>&1}
-    chomp $v
-    $v
+    Kafka::_decode("pkg_version", kafka__pkg_version("{}"))->{version}
 }
 
 fn Kafka::ping (%opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "ping"
-    my $cmd = join " ", @argv
-    my $out = qx{$cmd 2>/dev/null}
-    chomp $out
-    $? == 0 && $out =~ /^ok\b/
+    Kafka::_decode("ping",
+        kafka__ping(to_json(Kafka::_req({}, \%opts))))->{ok} ? 1 : 0
 }
 
-# ---------------------------------------------------------------------------
-# Producer
-# ---------------------------------------------------------------------------
+# ── cluster + metadata ──────────────────────────────────────────────
 
-# Returns { topic, partition, offset } after the broker acks.
-fn Kafka::produce ($topic, $value, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "produce", "send", Kafka::_shq($topic), "--value", Kafka::_shq($value)
-    push @argv, "--key", Kafka::_shq($opts{key}) if defined $opts{key}
-    push @argv, "--partition", Kafka::_shq($opts{partition}) if defined $opts{partition}
-    if (defined $opts{headers} && ref($opts{headers}) eq "HASH") {
-        for my $k (sort keys %{ $opts{headers} }) {
-            my $v = $opts{headers}{$k}
-            push @argv, "--header", Kafka::_shq("$k=$v")
-        }
-    }
-    Kafka::_run_json(\@argv)
+fn Kafka::cluster (%opts) {
+    Kafka::_decode("cluster", kafka__cluster(to_json(Kafka::_req({}, \%opts))))
 }
 
-# Bulk publish. $rows is an arrayref of `{ topic?, value, key?, headers?, partition? }`.
-# Returns { sent, last } summary.
-fn Kafka::produce_many ($rows, %opts) {
-    my $arr = ref($rows) eq "ARRAY" ? $rows : [$rows]
-    return { sent => 0 } unless @$arr
-
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "produce", "stream"
-    push @argv, "--default-topic", Kafka::_shq($opts{default_topic}) if defined $opts{default_topic}
-    push @argv, "--ack-timeout-ms", Kafka::_shq($opts{ack_timeout_ms}) if defined $opts{ack_timeout_ms}
-    push @argv, "--limit", Kafka::_shq($opts{limit}) if defined $opts{limit}
-
-    my $tmp = "/tmp/stryke-kafka-prod-$$-" . time()
-    my $cmd = join(" ", @argv) . " > " . Kafka::_shq($tmp)
-    open my $fh, "|-", $cmd or die "Kafka::produce_many: spawn failed: $!"
-    for my $row (@$arr) {
-        print $fh to_json($row) . "\n"
-    }
-    close $fh or do {
-        unlink $tmp
-        die "Kafka::produce_many: helper exited ($?)"
-    }
-    my $raw = ""
-    if (open my $rf, "<", $tmp) {
-        local $/
-        $raw = <$rf>
-        close $rf
-    }
-    unlink $tmp
-    # Take the last JSON line.
-    my $last
-    for my $line (split /\n/, $raw) {
-        next unless $line =~ /^[{\[]/
-        $last = $line
-    }
-    defined $last ? from_json($last) : { sent => 0 }
-}
-
-# ---------------------------------------------------------------------------
-# Consumer
-# ---------------------------------------------------------------------------
-
-# Returns an array of message hashrefs. $topic may be a comma-separated
-# list. Pulls until --max OR --idle-ms of silence.
-fn Kafka::consume ($topic, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "consume", Kafka::_shq($topic)
-    push @argv, "--group",        Kafka::_shq($opts{group})        if defined $opts{group}
-    push @argv, "--offset-reset", Kafka::_shq($opts{offset_reset}) if defined $opts{offset_reset}
-    push @argv, "--max",          Kafka::_shq($opts{max})          if defined $opts{max}
-    push @argv, "--idle-ms",      Kafka::_shq($opts{idle_ms})      if defined $opts{idle_ms}
-    push @argv, "--value-mode",   Kafka::_shq($opts{value_mode})   if defined $opts{value_mode}
-    push @argv, "--commit" if $opts{commit}
-    Kafka::_run_ndjson(\@argv)
-}
-
-# Streaming consumer — callback fires once per message. Returns count.
-fn Kafka::consume_stream ($topic, %opts) {
-    die "Kafka::consume_stream: callback => sub { … } is required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "consume", Kafka::_shq($topic)
-    push @argv, "--group",        Kafka::_shq($opts{group})        if defined $opts{group}
-    push @argv, "--offset-reset", Kafka::_shq($opts{offset_reset}) if defined $opts{offset_reset}
-    push @argv, "--max",          Kafka::_shq($opts{max})          if defined $opts{max}
-    push @argv, "--idle-ms",      Kafka::_shq($opts{idle_ms})      if defined $opts{idle_ms}
-    push @argv, "--value-mode",   Kafka::_shq($opts{value_mode})   if defined $opts{value_mode}
-    push @argv, "--commit" if $opts{commit}
-    my $cmd = join " ", @argv
-
-    my $n = 0
-    open my $fh, "-|", $cmd or die "Kafka::consume_stream: spawn failed: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        $cb->(from_json $line)
-        $n++
-    }
-    close $fh or die "Kafka::consume_stream: helper exited ($?)"
-    $n
-}
-
-# ---------------------------------------------------------------------------
-# Admin / metadata
-# ---------------------------------------------------------------------------
-
-# Returns array of { name, partitions, error }.
 fn Kafka::topics (%opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "topics"
-    Kafka::_run_ndjson(\@argv)
+    my $o = Kafka::_decode("topics", kafka__topics(to_json(Kafka::_req({}, \%opts))))
+    @{ $o->{topics} }
 }
 
 fn Kafka::describe ($topic, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "admin", "describe", Kafka::_shq($topic)
-    Kafka::_run_json(\@argv)
+    Kafka::_decode("describe",
+        kafka__describe(to_json(Kafka::_req({ topic => $topic }, \%opts))))
 }
 
-# Consumer groups.
 fn Kafka::groups (%opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "groups"
-    Kafka::_run_ndjson(\@argv)
+    my $o = Kafka::_decode("groups", kafka__groups(to_json(Kafka::_req({}, \%opts))))
+    @{ $o->{groups} }
 }
 
-# { broker_count, controller_id, brokers, topic_count }
-fn Kafka::cluster (%opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "cluster"
-    Kafka::_run_json(\@argv)
-}
-
-# Returns an array of { topic, partition, committed, low_watermark,
-# high_watermark, lag } plus a final summary { total_lag }.
+# Lag computation is deferred — derive client-side from groups + topic
+# metadata if needed.
 fn Kafka::lag ($group, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "lag", "--group", Kafka::_shq($group)
-    push @argv, "--topic", Kafka::_shq($opts{topic}) if defined $opts{topic}
-    Kafka::_run_ndjson(\@argv)
+    die "Kafka::lag: dedicated lag op deferred in v0.2.0 cdylib"
 }
 
-# { name, created } or { name, created:false, error }.
-fn Kafka::create_topic ($name, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "admin", "create-topic", Kafka::_shq($name)
-    push @argv, "--partitions", Kafka::_shq($opts{partitions})   if defined $opts{partitions}
-    push @argv, "--replication", Kafka::_shq($opts{replication}) if defined $opts{replication}
-    if (defined $opts{configs} && ref($opts{configs}) eq "HASH") {
-        for my $k (sort keys %{ $opts{configs} }) {
-            my $v = $opts{configs}{$k}
-            push @argv, "--conf", Kafka::_shq("$k=$v")
-        }
+# ── produce ─────────────────────────────────────────────────────────
+
+fn Kafka::produce ($topic, $value, %opts) {
+    my $r = Kafka::_req(
+        { topic => $topic, value => $value, key => $opts{key} }, \%opts)
+    Kafka::_decode("produce", kafka__produce(to_json($r)))
+}
+
+# $rows: arrayref of { value, key? } hashrefs.
+fn Kafka::produce_many ($rows, %opts) {
+    die "Kafka::produce_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
+    die "Kafka::produce_many: topic => 'name' required" unless defined $opts{topic}
+    my $r = Kafka::_req({ topic => $opts{topic}, rows => $rows }, \%opts)
+    Kafka::_decode("produce_many", kafka__produce_many(to_json($r)))->{sent}
+}
+
+# ── consume (snapshot) ──────────────────────────────────────────────
+
+fn Kafka::consume ($topic, %opts) {
+    my $r = Kafka::_req(
+        { topic => $topic, limit => $opts{limit}, timeout_ms => $opts{timeout_ms}, group => $opts{group} },
+        \%opts
+    )
+    my $o = Kafka::_decode("consume", kafka__consume(to_json($r)))
+    @{ $o->{messages} }
+}
+
+# Streaming consume snapshot + per-message callback.
+fn Kafka::consume_stream ($topic, %opts) {
+    die "Kafka::consume_stream: callback => sub { … } required" unless defined $opts{callback}
+    my $cb = $opts{callback}
+    my @msgs = Kafka::consume($topic, %opts)
+    my $n = 0
+    for my $m (@msgs) {
+        $cb->($m)
+        $n++
     }
-    Kafka::_run_json(\@argv)
+    $n
+}
+
+# ── topic admin ─────────────────────────────────────────────────────
+
+fn Kafka::create_topic ($name, %opts) {
+    my $r = Kafka::_req(
+        { name => $name, partitions => $opts{partitions}, replication => $opts{replication} },
+        \%opts
+    )
+    Kafka::_decode("create_topic", kafka__create_topic(to_json($r)))
 }
 
 fn Kafka::delete_topic ($name, %opts) {
-    my @argv = Kafka::_conn_argv(\%opts)
-    push @argv, "admin", "delete-topic", Kafka::_shq($name)
-    Kafka::_run_json(\@argv)
+    Kafka::_decode("delete_topic",
+        kafka__delete_topic(to_json(Kafka::_req({ name => $name }, \%opts))))
 }
 
 1

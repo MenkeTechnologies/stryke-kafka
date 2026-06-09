@@ -72,76 +72,6 @@ jobs:
           fi
       - run: cargo test --locked --no-fail-fast
 
-  helper-live-kafka:
-    name: Helper end-to-end (Apache Kafka KRaft)
-    runs-on: ubuntu-latest
-    services:
-      kafka:
-        image: apache/kafka:3.9.0
-        env:
-          KAFKA_NODE_ID: 1
-          KAFKA_PROCESS_ROLES: broker,controller
-          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
-        ports:
-          - 9092:9092
-        options: >-
-          --health-cmd="/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=20
-          --health-start-period=20s
-    env:
-      KAFKA_BROKERS: localhost:9092
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
-
-      - run: cargo build --release --locked
-
-      - name: Wait for Kafka
-        run: |
-          for i in $(seq 1 60); do
-            bash -c 'echo > /dev/tcp/127.0.0.1/9092' >/dev/null 2>&1 && exit 0
-            sleep 2
-          done
-          echo "Kafka never came up" >&2
-          exit 1
-
-      - name: ping + create + produce + consume + delete
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-kafka-helper
-          $H ping
-          $H admin create-topic ci-smoke --partitions=2 --replication=1 | jq -e '.created == true'
-          $H topics | grep -q ci-smoke
-          $H produce send ci-smoke --value='hello' --key=k1 | jq -e '.partition >= 0 and .offset >= 0'
-          # Push 5 messages via NDJSON streaming.
-          printf '{"value":"a","key":"1"}\n{"value":"b","key":"2"}\n{"value":"c","key":"3"}\n{"value":"d","key":"4"}\n{"value":"e","key":"5"}\n' \
-            | $H produce stream --default-topic=ci-smoke | jq -e '.sent == 5'
-          # Give the broker a moment to fsync the last batch before a fresh
-          # consumer group tries to subscribe + assign + fetch.
-          sleep 2
-          # Consume them back. Generous idle so the consumer-group join +
-          # assignment + first fetch can complete on a cold runner.
-          n=$($H consume ci-smoke --offset-reset=earliest --max=6 --idle-ms=30000 --group=ci-smoke-grp | wc -l | tr -d ' ')
-          echo "consume returned $n messages"
-          [ "$n" = 6 ]
-          $H admin describe ci-smoke | jq -e '.partition_count == 2'
-          $H admin delete-topic ci-smoke | jq -e '.deleted == true'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -157,7 +87,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-live-kafka]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -184,7 +114,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-kafka-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-kafka-helper
+          path: target/${{ matrix.target }}/release/libstryke_kafka.*
 
   docs-gates:
     name: Docs gates

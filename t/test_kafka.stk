@@ -1,22 +1,21 @@
 # t/test_kafka.stk — round-trip tests against a live Kafka cluster.
 #
-# Skips cleanly when:
-#   * the helper isn't built
-#   * $KAFKA_BROKERS isn't set
-#   * the broker isn't reachable
+# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
+# from the package root so stryke's FFI bridge dlopens
+# lib/libstryke_kafka.{dylib,so} on `use Kafka`.
 
-require "./lib/Kafka.stk"
+use Kafka
 
-my $have_helper = eval { Kafka::helper_path(); 1 }
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+my $have_cdylib = eval { Kafka::version(); 1 }
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 unless (defined $ENV{KAFKA_BROKERS} && $ENV{KAFKA_BROKERS} ne "") {
     p "1..0 # SKIP \$KAFKA_BROKERS not set"
     exit 0
 }
-unless (Kafka::ping()) {
+unless (eval { Kafka::ping() }) {
     p "1..0 # SKIP cannot reach Kafka at $ENV{KAFKA_BROKERS}"
     exit 0
 }

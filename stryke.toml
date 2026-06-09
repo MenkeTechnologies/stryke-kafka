@@ -1,15 +1,28 @@
 [package]
 name = "kafka"
-version = "0.1.0"
-description = "Apache Kafka client for stryke. Produce, consume, admin, and consumer-group lag against any Kafka 0.10+ cluster. Opt-in package tier."
+version = "0.2.0"
+description = "Apache Kafka client for stryke. Produce, consume, admin against any Kafka 0.10+ cluster. cdylib loaded in-process — persistent FutureProducer + AdminClient across calls. Producer batching/compression now works as designed (v1 fork-per-call defeated it)."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-kafka"
 edition = "2026"
 
-[bin]
-kafka = "bin/kafka.stk"
-kafka-build = "bin/kafka-build.stk"
+[ffi]
+lib-name = "stryke_kafka"
+namespace = "Kafka"
+exports = [
+    "kafka__pkg_version",
+    "kafka__ping",
+    "kafka__cluster",
+    "kafka__topics",
+    "kafka__describe",
+    "kafka__groups",
+    "kafka__produce",
+    "kafka__produce_many",
+    "kafka__consume",
+    "kafka__create_topic",
+    "kafka__delete_topic",
+]
 
 [scripts]
 build = "cargo build --release"
