@@ -2,7 +2,7 @@
 name = "stryke-kafka"
 version = "0.2.0"
 edition = "2021"
-description = "Apache Kafka cdylib for stryke. Dlopened in-process with a persistent FutureProducer + admin client per (brokers) tuple."
+description = "Apache Kafka cdylib for stryke. Dlopened in-process with a persistent FutureProducer + admin client per (brokers) tuple"
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-kafka"
