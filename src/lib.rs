@@ -590,7 +590,9 @@ mod tests {
         let s = unsafe { CStr::from_ptr(raw).to_str().expect("utf8").to_owned() };
         unsafe { stryke_free_cstring(raw as *mut c_char) };
         let v: Value = serde_json::from_str(&s).expect("must be JSON");
-        let obj = v.as_object().expect("must be a JSON object, not array/string");
+        let obj = v
+            .as_object()
+            .expect("must be a JSON object, not array/string");
         assert_eq!(obj.len(), 1, "error response must have exactly one key");
         assert_eq!(
             obj.get("error").and_then(|e| e.as_str()),
