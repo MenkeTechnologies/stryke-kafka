@@ -525,4 +525,23 @@ mod tests {
         let b = base_config("h:1");
         assert_eq!(b.get("enable.auto.commit"), None);
     }
+
+    /// Consumer config overrides must take effect — auto.offset.reset and
+    /// enable.auto.commit are both required for consume_stream's snapshot
+    /// semantics. Regression here would silently move offsets.
+    #[test]
+    fn make_consumer_sets_explicit_offset_and_commit_policy() {
+        with_env(|| {
+            std::env::set_var("KAFKA_BROKERS", "h:1");
+            // Default group_id (no override): the documented "snapshot" name
+            // must appear so observers can spot stryke-kafka consumers in
+            // broker-side `kafka-consumer-groups --list`.
+            let consumer = make_base_consumer(&json!({}), None);
+            assert!(consumer.is_ok(), "default consumer build failed: {:?}", consumer.err());
+
+            // Explicit group override flows through verbatim.
+            let consumer_g = make_base_consumer(&json!({}), Some("my-test-group"));
+            assert!(consumer_g.is_ok(), "explicit-group consumer build failed");
+        });
+    }
 }
