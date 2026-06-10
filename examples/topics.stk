@@ -1,0 +1,40 @@
+#!/usr/bin/env stryke
+# examples/topics.stk — list + describe topics, show partition layout.
+#
+# Read-only operations against a live cluster. Eval-guarded so missing
+# brokers just exits cleanly without erroring.
+#
+# Run:   s examples/topics.stk
+#        KAFKA_BROKERS=localhost:9092 s examples/topics.stk
+
+use Kafka
+
+p "=== Kafka topics tour ==="
+
+val $alive = eval { Kafka::ping() }
+unless ($alive) {
+    p "kafka brokers not reachable — set KAFKA_BROKERS to exercise the demo"
+    exit 0
+}
+
+val @topics = Kafka::topics()
+p "topics found: " . scalar(@topics)
+p ""
+
+# Describe up to 5 topics — show partition count + replication factor.
+val $shown = scalar(@topics) < 5 ? scalar(@topics) : 5
+for (var $i = 0; $i < $shown; $i++) {
+    val $t = $topics[$i]
+    val $desc = eval { Kafka::describe($t) }
+    if (!$@ && defined $desc) {
+        val $np = scalar(@{ $desc->{partitions} // [] })
+        val $rf = $desc->{partitions}[0]{replicas} ? scalar(@{ $desc->{partitions}[0]{replicas} }) : "?"
+        p "  $t: $np partitions, replication factor $rf"
+    } else {
+        p "  $t: (describe failed)"
+    }
+}
+
+if (scalar(@topics) > 5) {
+    p "  ... + " . (scalar(@topics) - 5) . " more"
+}
