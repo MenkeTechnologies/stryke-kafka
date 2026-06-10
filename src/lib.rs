@@ -537,7 +537,11 @@ mod tests {
             // must appear so observers can spot stryke-kafka consumers in
             // broker-side `kafka-consumer-groups --list`.
             let consumer = make_base_consumer(&json!({}), None);
-            assert!(consumer.is_ok(), "default consumer build failed: {:?}", consumer.err());
+            assert!(
+                consumer.is_ok(),
+                "default consumer build failed: {:?}",
+                consumer.err()
+            );
 
             // Explicit group override flows through verbatim.
             let consumer_g = make_base_consumer(&json!({}), Some("my-test-group"));
