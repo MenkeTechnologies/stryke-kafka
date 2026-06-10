@@ -53,12 +53,12 @@ fn producers() -> &'static Mutex<HashMap<String, FutureProducer>> {
     PRODUCERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-static ADMINS: OnceCell<Mutex<HashMap<String, AdminClient<DefaultClientContext>>>> =
-    OnceCell::new();
-
-fn admins() -> &'static Mutex<HashMap<String, AdminClient<DefaultClientContext>>> {
-    ADMINS.get_or_init(|| Mutex::new(HashMap::new()))
-}
+// Note: no admin-client cache. `AdminClient` doesn't impl Clone, so a
+// HashMap<String, AdminClient> can never serve a cache-hit (would need
+// `Arc<AdminClient>` and rdkafka's `AdminClient::create` is cheap enough
+// that the per-call construction isn't a hot path). Pre-fix a dead cache
+// was here that the lookup never read from and never wrote to, giving the
+// false impression admin clients were reused.
 
 // ── connection options ──────────────────────────────────────────────────────
 
@@ -93,15 +93,6 @@ fn get_producer(opts: &Value) -> Result<FutureProducer> {
 
 fn get_admin(opts: &Value) -> Result<AdminClient<DefaultClientContext>> {
     let brokers = brokers_from_opts(opts);
-    {
-        let map = admins().lock();
-        if let Some(a) = map.get(&brokers) {
-            // AdminClient doesn't impl Clone; we have to drop the cache
-            // and recreate on demand. Keep the entry but return a fresh
-            // handle.
-            let _ = a;
-        }
-    }
     let cfg = base_config(&brokers);
     let admin: AdminClient<_> = cfg.create()?;
     Ok(admin)
