@@ -633,4 +633,235 @@ mod tests {
         // stryke_free_cstring(null) must be a no-op, not a deref.
         unsafe { stryke_free_cstring(std::ptr::null_mut()) };
     }
+
+    // ── Argument-validation contracts on exported FFI ops ────────────────
+    // These pin the "fail fast before touching a broker" contract for the
+    // three exports most likely to be mis-shaped by stryke callers. Each
+    // one MUST surface as a flat `{"error": "<msg>"}` immediately, with no
+    // broker handshake, no 10-second message.timeout.ms wait, and no
+    // panic across the FFI boundary. A regression here would convert a
+    // user typo (e.g. `messages:` instead of `rows:`) into a multi-second
+    // hang under the runtime.
+    //
+    // We invoke each export with a JSON arg that is structurally valid
+    // (parses as a JSON object) but missing the required key. The validator
+    // must short-circuit before `get_producer` / `get_admin` builds its
+    // librdkafka client. If validation regresses to "build first, validate
+    // later", the test would hang or fail with a network-style error,
+    // not the documented message.
+
+    fn ffi_call_with_json_arg(
+        f: extern "C" fn(*const c_char) -> *const c_char,
+        arg: &str,
+    ) -> Value {
+        let cs = CString::new(arg).expect("arg must not contain NUL");
+        let raw = f(cs.as_ptr());
+        assert!(!raw.is_null(), "FFI export returned null pointer");
+        let s = unsafe { CStr::from_ptr(raw).to_str().expect("utf8").to_owned() };
+        unsafe { stryke_free_cstring(raw as *mut c_char) };
+        serde_json::from_str::<Value>(&s).expect("FFI return must be JSON")
+    }
+
+    /// `kafka__produce` with no `topic` key must short-circuit with the
+    /// exact documented error string — NOT block on a broker handshake,
+    /// NOT panic, NOT return a network/timeout error. Catches a class of
+    /// regression where someone refactors `op_produce` to build the
+    /// producer before validating args, which would turn a user typo
+    /// into a 10-second hang under `message.timeout.ms`.
+    #[test]
+    fn kafka_produce_missing_topic_fails_before_broker_contact() {
+        let start = std::time::Instant::now();
+        let v = ffi_call_with_json_arg(kafka__produce, r#"{"value":"hi"}"#);
+        let elapsed = start.elapsed();
+        // Must short-circuit well under message.timeout.ms (10s); a 1s cap
+        // is generous for a pure-validation path on any CI runner.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "validation path took {elapsed:?} — regression to build-before-validate?"
+        );
+        let obj = v.as_object().expect("must be flat JSON object");
+        assert_eq!(obj.len(), 1, "error response must be flat single-key");
+        assert_eq!(
+            obj.get("error").and_then(|e| e.as_str()),
+            Some("missing topic"),
+            "exact contract string required; stryke matches on this"
+        );
+    }
+
+    /// `kafka__produce_many` with `rows` as a JSON object (not array)
+    /// must surface the documented error verbatim. The validator uses
+    /// `as_array().ok_or_else(...)` — if a future refactor swaps to
+    /// `as_array().unwrap_or_default()`, the test catches the silent
+    /// no-op (sent=0, no error) that would mislead callers who passed
+    /// `{"rows": {"k":"v"}}` thinking objects iterate.
+    #[test]
+    fn kafka_produce_many_rejects_non_array_rows() {
+        let v = ffi_call_with_json_arg(kafka__produce_many, r#"{"topic":"t","rows":{"k":"v"}}"#);
+        let obj = v.as_object().expect("must be flat JSON object");
+        let err = obj
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("must surface as error, not silent sent=0");
+        assert!(
+            err.starts_with("missing rows"),
+            "expected `missing rows (...)` contract; got: {err}"
+        );
+        // Specifically: must NOT have silently treated the object as empty
+        // and returned a success-shaped {sent:0} payload.
+        assert!(
+            obj.get("sent").is_none(),
+            "non-array rows must not produce a success-shaped response"
+        );
+    }
+
+    /// `kafka__delete_topic` with `name` as a JSON integer must NOT
+    /// coerce the integer to a string and attempt deletion of a topic
+    /// literally named "42". `opts["name"].as_str()` returns None for
+    /// non-strings, so the early `missing name` error fires — this test
+    /// pins that contract. A regression to `name.to_string()` would
+    /// silently delete the wrong topic.
+    #[test]
+    fn kafka_delete_topic_does_not_coerce_int_name_to_string() {
+        let v = ffi_call_with_json_arg(kafka__delete_topic, r#"{"name":42}"#);
+        let obj = v.as_object().expect("must be flat JSON object");
+        let err = obj
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("integer name must surface as error, not be coerced");
+        assert_eq!(
+            err, "missing name",
+            "integer `name` must be rejected as missing, never coerced"
+        );
+        // Crucially: must not have reached the admin client at all.
+        // If it had, the error string would include broker/network
+        // language ("failed to fetch", "BrokerTransportFailure", etc.).
+        assert!(
+            !err.to_lowercase().contains("broker")
+                && !err.to_lowercase().contains("transport")
+                && !err.to_lowercase().contains("connect"),
+            "validator must reject before admin client contact; got: {err}"
+        );
+    }
+
+    // ── Malformed-input robustness on FFI parse boundary ─────────────────
+    // `ffi_call_async` line ~361 does `serde_json::from_slice(...).unwrap_or(Value::Null)`.
+    // The `unwrap_or` (not `expect`) is load-bearing: stryke's FFI bridge
+    // can hand us truncated, doubly-escaped, or otherwise-malformed JSON
+    // (e.g. from a partial pipe read or a quoting bug in caller code). If
+    // a future refactor swaps to `.expect(...)` or `.unwrap()`, every such
+    // call would panic across the FFI boundary; `catch_unwind` would then
+    // be the only thing keeping the host shell alive. We pin both layers:
+    // (1) malformed JSON must NOT panic, (2) the missing-required-key
+    // error must still surface (because Null["topic"] == Null, .as_str() == None).
+
+    /// Garbage bytes on stdin/args must surface as the documented
+    /// "missing topic" error, not as a panic, JSON-parse error, or hang.
+    /// Catches the regression class: someone replaces
+    /// `serde_json::from_slice(...).unwrap_or(Value::Null)` with a
+    /// strict variant. Garbage-in → host crash via panic-across-FFI
+    /// would be the resulting silent disaster.
+    #[test]
+    fn ffi_malformed_json_input_does_not_panic_and_falls_through_to_validator() {
+        // Truncated JSON, not even close to valid.
+        let v = ffi_call_with_json_arg(kafka__produce, "not-json-{[}");
+        let obj = v
+            .as_object()
+            .expect("must be flat JSON object even on malformed input");
+        let err = obj
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("malformed-input path must produce error field");
+        // Specifically: the validator's "missing topic" message — proves
+        // the parse failed silently (→ Value::Null) and then opts["topic"]
+        // returned Null whose .as_str() is None, triggering the documented
+        // arg-validation error. If we got a panic-marker error here, the
+        // parse path itself panicked instead of falling through.
+        assert_eq!(
+            err, "missing topic",
+            "malformed JSON must fall through to validator with documented error; \
+             got: {err} (a panic-marker here means the parse panicked)"
+        );
+        assert!(
+            !err.contains("panicked"),
+            "malformed-input path panicked across FFI: {err}"
+        );
+    }
+
+    /// Empty-string JSON args must also fall through to validation, not
+    /// panic. serde_json returns `Err` on empty input; the `.unwrap_or`
+    /// contract must hold. Distinct test from the malformed-bytes case
+    /// because empty input hits a different serde_json error path.
+    #[test]
+    fn ffi_empty_string_input_does_not_panic() {
+        let v = ffi_call_with_json_arg(kafka__produce, "");
+        let obj = v
+            .as_object()
+            .expect("empty input must still produce flat JSON object");
+        assert_eq!(
+            obj.get("error").and_then(|e| e.as_str()),
+            Some("missing topic"),
+            "empty-input parse must silently coerce to Null and surface as missing-key"
+        );
+    }
+
+    /// `kafka__produce_many` with `rows: null` (JSON null literal, not
+    /// missing-key, not non-array-object) must surface the documented
+    /// "missing rows" error. This is a different Value variant from
+    /// the existing non-array-object test: `Value::Null.as_array()`
+    /// returns None via a different match arm than `Value::Object.as_array()`.
+    /// Catches a regression where someone adds `if rows.is_null() {
+    /// return Ok(empty) }` as a "convenience" no-op — silently coercing
+    /// caller mistakes into success-shaped responses.
+    #[test]
+    fn kafka_produce_many_rejects_null_rows_distinctly_from_missing() {
+        let v = ffi_call_with_json_arg(kafka__produce_many, r#"{"topic":"t","rows":null}"#);
+        let obj = v.as_object().expect("must be flat JSON object");
+        let err = obj
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("null rows must surface as error, not as silent sent=0");
+        assert!(
+            err.starts_with("missing rows"),
+            "expected `missing rows (...)` contract for JSON null; got: {err}"
+        );
+        // The success-shape sentinel: a regression that no-ops on null
+        // would emit `{topic, sent: 0, errors: []}`. We must not see
+        // `sent` in the response at all.
+        assert!(
+            obj.get("sent").is_none(),
+            "null rows must not produce success-shaped {{sent: 0}} response"
+        );
+        assert!(
+            obj.get("errors").is_none(),
+            "null rows must not produce success-shaped {{errors: []}} response"
+        );
+    }
+
+    /// `op_describe` requires both a topic AND that the topic appear in
+    /// the broker metadata response (line ~169 `find(|t| t.name() == topic)`).
+    /// The validator must reject a missing `topic` key BEFORE attempting
+    /// metadata fetch — otherwise a user-typo turns into a 5-second
+    /// blocking metadata fetch. This pins the same "validate-before-network"
+    /// contract as the produce/delete-topic tests, but for the admin-read
+    /// path, which has a different broker-contact pattern (fetch_metadata
+    /// vs producer.send vs admin.delete_topics).
+    #[test]
+    fn kafka_describe_missing_topic_fails_before_metadata_fetch() {
+        let start = std::time::Instant::now();
+        let v = ffi_call_with_json_arg(kafka__describe, r#"{}"#);
+        let elapsed = start.elapsed();
+        // fetch_metadata has a 5s timeout; validation must short-circuit
+        // well under that. 1s cap is generous for any CI runner.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "describe validation took {elapsed:?} — regression to fetch-before-validate? \
+             That would hang for 5s on every typo."
+        );
+        let obj = v.as_object().expect("must be flat JSON object");
+        assert_eq!(
+            obj.get("error").and_then(|e| e.as_str()),
+            Some("missing topic"),
+            "exact contract string required"
+        );
+    }
 }
