@@ -548,4 +548,87 @@ mod tests {
             assert!(consumer_g.is_ok(), "explicit-group consumer build failed");
         });
     }
+
+    // ── FFI-boundary safety tests ─────────────────────────────────────────
+    // The cdylib is dlopened in-process by stryke; a handler panic that
+    // escaped `catch_unwind` would tear the host shell down. A null/garbled
+    // FFI return would manifest as a stryke crash, not a Kafka error.
+    // These tests pin the safety contracts that keep the host alive.
+
+    /// A handler that panics MUST NOT unwind across the FFI boundary.
+    /// `ffi_call_async` wraps `rt().block_on(...)` in `catch_unwind` for
+    /// exactly this reason; removing it would convert any rdkafka panic
+    /// (e.g. inside librdkafka's tokio task) into a host-shell abort.
+    #[test]
+    fn ffi_handler_panic_is_caught_and_reported_as_json() {
+        let raw = ffi_call_async(std::ptr::null(), |_| async {
+            panic!("simulated rdkafka panic");
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(json!({}))
+        });
+        assert!(!raw.is_null(), "panic path returned null *const c_char");
+        // SAFETY: ffi_call_async returns a CString::into_raw pointer.
+        let s = unsafe { CStr::from_ptr(raw).to_str().expect("utf8").to_owned() };
+        unsafe { stryke_free_cstring(raw as *mut c_char) };
+        let v: Value = serde_json::from_str(&s).expect("ffi return must be valid JSON");
+        let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("panicked"),
+            "expected panic-marker in error field; got: {s}"
+        );
+    }
+
+    /// A handler that returns `Err(anyhow!(...))` MUST surface as
+    /// `{"error": "<msg>"}` — flat, no nesting, no `cause` chain — so
+    /// stryke's bridge can match on a single key.
+    #[test]
+    fn ffi_handler_error_returns_flat_error_object() {
+        let raw = ffi_call_async(std::ptr::null(), |_| async {
+            Err::<Value, _>(anyhow!("missing topic"))
+        });
+        assert!(!raw.is_null());
+        let s = unsafe { CStr::from_ptr(raw).to_str().expect("utf8").to_owned() };
+        unsafe { stryke_free_cstring(raw as *mut c_char) };
+        let v: Value = serde_json::from_str(&s).expect("must be JSON");
+        let obj = v.as_object().expect("must be a JSON object, not array/string");
+        assert_eq!(obj.len(), 1, "error response must have exactly one key");
+        assert_eq!(
+            obj.get("error").and_then(|e| e.as_str()),
+            Some("missing topic"),
+            "error message must round-trip verbatim"
+        );
+    }
+
+    /// End-to-end FFI round-trip for the one export that needs no broker:
+    /// `kafka__pkg_version(null)` → JSON with the same version as
+    /// `CARGO_PKG_VERSION` → `stryke_free_cstring` reclaims the allocation.
+    /// Catches: null returns from `CString::new` (would crash the host on
+    /// deref), null-arg handling in `ffi_call_async`, version drift
+    /// between `env!("CARGO_PKG_VERSION")` and the exported JSON, and
+    /// allocator-boundary mismatch in `stryke_free_cstring`
+    /// (`CString::from_raw` on a non-`CString::into_raw` pointer is UB).
+    #[test]
+    fn kafka_pkg_version_ffi_roundtrip_matches_cargo_metadata() {
+        let raw = kafka__pkg_version(std::ptr::null());
+        assert!(
+            !raw.is_null(),
+            "kafka__pkg_version returned null — CString::new failed on its own output"
+        );
+        let s = unsafe { CStr::from_ptr(raw).to_str().expect("utf8").to_owned() };
+        // Free immediately to surface any allocator-boundary bug under
+        // test runners (miri / asan / debug allocator) before assertions.
+        unsafe { stryke_free_cstring(raw as *mut c_char) };
+        let v: Value = serde_json::from_str(&s).expect("must be JSON");
+        let version = v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .expect("`version` key must be present and a string");
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "FFI-reported version drifted from Cargo.toml"
+        );
+        // stryke_free_cstring(null) must be a no-op, not a deref.
+        unsafe { stryke_free_cstring(std::ptr::null_mut()) };
+    }
 }
