@@ -8,7 +8,7 @@ val $topic = $ARGV[0]
 die "usage: tail_topic.stk TOPIC\n" unless defined $topic
 
 p "tailing $topic — Ctrl-C to stop"
-val $n = Kafka::consume_stream $topic,
+val $n = Kafka::consume_stream($topic,
     offset_reset => "latest",
     value_mode   => "json",
     idle_ms      => 60_000,
@@ -16,5 +16,5 @@ val $n = Kafka::consume_stream $topic,
         p sprintf("[%d.%d @ %d]  key=%s  val=%s",
                   $m->{partition}, $m->{offset}, $m->{timestamp},
                   $m->{key} // "-", to_json($m->{value}))
-    }
+    })
 warn "stopped after $n msgs\n"
