@@ -1,0 +1,37 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `Kafka` package.
+#
+# Runs end-to-end in CI: eval-guarded `Kafka::ping` returns false-ish
+# when no broker is reachable. The round-trip block skips, the summary
+# still prints. With $KAFKA_BROKERS pointing at a live cluster, the
+# discovery ops (cluster + topics + groups) are zero side effect.
+#
+# Run:   s examples/discover.stk
+#        KAFKA_BROKERS=localhost:9092 s examples/discover.stk
+
+use Kafka
+
+p "=== Kafka discover ==="
+p "version:       " . Kafka::version()
+p "KAFKA_BROKERS: " . ($ENV{KAFKA_BROKERS} // "(default localhost:9092)")
+p ""
+
+val $alive = eval { Kafka::ping() }
+
+if ($alive && !$@) {
+    p "service: reachable — surveying cluster"
+    val $cluster = Kafka::cluster()
+    p "  brokers: " . scalar(@{ $cluster->{brokers} // [] })
+    val @topics = Kafka::topics()
+    p "  topics:  " . scalar(@topics)
+    val @groups = Kafka::groups()
+    p "  groups:  " . scalar(@groups)
+} else {
+    p "service: not reachable — skipping live ops"
+    p ""
+    p "expected call shape when live:"
+    p "  val \$cluster = Kafka::cluster()"
+    p "  val @topics  = Kafka::topics()"
+    p "  val \$desc    = Kafka::describe(\$topic)"
+    p "  val @groups  = Kafka::groups()"
+}
