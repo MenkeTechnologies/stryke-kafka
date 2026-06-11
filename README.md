@@ -12,13 +12,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
 
-### `[APACHE KAFKA CLIENT FOR STRYKE // PRODUCER + CONSUMER + ADMIN + CONSUMER-GROUP LAG]`
+### `[APACHE KAFKA CLIENT FOR STRYKE // PRODUCER + CONSUMER + TOPIC/CLUSTER ADMIN]`
 
 > *"Streams without the JVM."*
 
-Apache Kafka client for stryke — producer, consumer, admin, and
-consumer-group lag. Opt-in package tier, kept out of the stryke core
-binary so the daily-driver install stays slim.
+Apache Kafka client for stryke — producer, consumer, and topic /
+cluster admin (consumer-group lag deferred in v0.2.x). Opt-in package
+tier, kept out of the stryke core binary so the daily-driver install
+stays slim.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-redis`](https://github.com/MenkeTechnologies/stryke-redis) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
@@ -31,7 +32,7 @@ binary so the daily-driver install stays slim.
 - [\[0x02\] Quick start](#0x02-quick-start)
 - [\[0x03\] CLI: `kafka`](#0x03-cli-kafka)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x05\] FFI layer](#0x05-ffi-layer)
 - [\[0x06\] Tests](#0x06-tests)
 - [\[0x07\] Dev workflow](#0x07-dev-workflow)
 - [\[0x08\] Layout](#0x08-layout)
@@ -46,12 +47,13 @@ Kafka integration requires librdkafka, the canonical C client that every
 Kafka tool eventually wraps. The Rust binding (`rdkafka`) builds against
 either a system library or a vendored cmake-compiled archive. Either way
 the artifact is big enough that it doesn't belong in stryke core. Opt in
-once, get full producer + consumer + admin + lag tooling.
+once, get producer + consumer + topic/cluster admin tooling.
 
-`stryke-kafka` ships a thin stryke library plus a Rust helper binary
-(`stryke-kafka-helper`, ~2.4 MB). The helper statically links librdkafka
-via `rdkafka`'s `cmake-build` feature, so the binary is portable across
-glibc / musl / macOS without depending on a system `libkafka.so`.
+`stryke-kafka` ships a thin stryke library plus a Rust cdylib
+(`libstryke_kafka.{dylib,so}`) dlopened in-process. The cdylib
+statically links librdkafka via `rdkafka`'s `cmake-build` feature, so
+it is portable across glibc / musl / macOS without depending on a
+system `librdkafka.so`.
 
 ## [0x01] Install
 
@@ -92,63 +94,50 @@ $ENV{KAFKA_BROKERS} = "localhost:9092"
 p Kafka::ping() ? "alive" : "down"
 
 # Produce.
-my $r = Kafka::produce "events", "hello stryke", key => "k1",
-                       headers => { source => "stryke" }
+my $r = Kafka::produce "events", "hello stryke", key => "k1"
 p "wrote $r->{topic}/$r->{partition}@$r->{offset}"
 
-# Bulk produce — array of hashrefs.
+# Bulk produce — array of { value, key? } hashrefs; topic is a named arg.
 Kafka::produce_many [
-    { topic => "events", value => "a", key => "1" },
-    { topic => "events", value => "b", key => "2" },
-    { topic => "events", value => "c", key => "3" },
-]
+    { value => "a", key => "1" },
+    { value => "b", key => "2" },
+    { value => "c", key => "3" },
+], topic => "events"
 
-# Consume up to N messages from a topic.
+# Snapshot consume — up to `limit` messages within `timeout_ms`.
 my @msgs = Kafka::consume "events",
-    group        => "stryke-demo",
-    offset_reset => "earliest",
-    max          => 100,
-    idle_ms      => 5_000
+    group      => "stryke-demo",
+    limit      => 100,
+    timeout_ms => 5_000
 @msgs |> ep
 
-# Streaming consume — callback per message, no buffering.
+# Callback per message (snapshot pull, then iterate).
 Kafka::consume_stream "events",
-    value_mode => "json",
-    callback   => sub ($m) {
+    callback => sub ($m) {
         p "$m->{partition}.$m->{offset}: $m->{value}"
     }
 
 # Admin / metadata.
-my @topics = Kafka::topics()
-p to_json $_ for @topics
+p $_ for Kafka::topics()
 
-Kafka::create_topic "new-topic", partitions => 6, replication => 1,
-                                 configs => { "cleanup.policy" => "compact" }
+Kafka::create_topic "new-topic", partitions => 6, replication => 1
 my $info = Kafka::describe "new-topic"
 p to_json $info
-
-# Consumer-group lag (the killer feature).
-my @lag = Kafka::lag "my-consumer-group"
-for my $row (@lag) {
-    next if defined $row->{total_lag}
-    p "$row->{topic}.$row->{partition}: $row->{lag}"
-}
 ```
 
-SASL / SSL — pass on every call OR set env vars:
+> `Kafka::lag` (consumer-group lag) is deferred in the v0.2.x cdylib —
+> it dies until a dedicated lag op ships. Derive lag client-side from
+> `Kafka::groups` + topic metadata if needed.
+
+Brokers — pass on every call OR set the env var:
 
 ```stryke
-my %prod = (
-    brokers           => "kafka-1:9094,kafka-2:9094",
-    security_protocol => "SASL_SSL",
-    sasl_mechanism    => "SCRAM-SHA-512",
-    sasl_username     => "user",
-    sasl_password     => $ENV{KAFKA_PWD},
-    ssl_ca            => "/etc/ssl/ca.pem",
-)
-Kafka::topics(%prod) |> ep
-Kafka::produce("events", "x", %prod)
+$ENV{KAFKA_BROKERS} = "localhost:9092"        # default
+Kafka::topics(brokers => "kafka-1:9094,kafka-2:9094") |> ep
 ```
+
+SASL / SSL connection options are deferred in v0.2.x — the only
+per-call connection opt is `brokers`.
 
 ## [0x03] CLI: `kafka`
 
@@ -200,57 +189,71 @@ Global flags (env vars in brackets):
 
 ```stryke
 Kafka::produce       $topic, $value, %opts → { topic, partition, offset }
-Kafka::produce_many  \@rows, %opts → { sent, last }
+Kafka::produce_many  \@rows, %opts → $sent          # requires topic => $name
 ```
 
-`produce` opts: `key`, `partition`, `headers` (hashref).
-`produce_many` rows: `{ topic?, value, key?, partition?, headers? }`. Pass
-`default_topic => "..."` to omit `topic` per row.
+`produce` opts: `key`.
+`produce_many` rows: `{ value, key? }`; the target topic is the
+required `topic => "..."` named arg.
 
 ### Consumer
 
 ```stryke
-Kafka::consume         $topics, %opts → @messages
-Kafka::consume_stream  $topics, %opts → $count            # callback per msg
+Kafka::consume         $topic, %opts → @messages
+Kafka::consume_stream  $topic, %opts → $count             # callback per msg
 ```
 
-`$topics` is comma-separated. Opts: `group`, `offset_reset` (`earliest` /
-`latest`), `max`, `idle_ms`, `value_mode` (`text` / `binary` / `json`),
-`commit` (bool — defaults off, leave offsets untouched).
+Opts: `group`, `limit` (default 10), `timeout_ms` (default 5000).
+Snapshot-style: subscribe, poll up to `limit` messages or until
+`timeout_ms` runs out. `consume_stream` pulls the same snapshot and
+fires `callback` per message.
 
 Message shape:
 
 ```
 {
-  topic, partition, offset, timestamp,
+  topic, partition, offset,
   key,                         # null if missing
-  value,                       # decoded per --value-mode
-  headers,                     # { k => v, ... }
+  value,                       # UTF-8 text (null if not valid UTF-8)
 }
 ```
 
 ### Admin
 
 ```stryke
-Kafka::topics        %opts → @topics            # [{name, partitions, error}]
-Kafka::describe      $topic, %opts → { name, partition_count, partitions }
+Kafka::topics        %opts → @names
+Kafka::describe      $topic, %opts → { topic, partition_count, partitions }
+                                     # partitions: [{id, leader, replicas, isr}]
 Kafka::groups        %opts → @groups            # [{name, state, ...}]
-Kafka::cluster       %opts → { broker_count, controller_id, brokers, topic_count }
-Kafka::lag           $group, %opts → @rows      # ends with {total_lag}
-Kafka::create_topic  $name, %opts → { name, created, error? }
-Kafka::delete_topic  $name, %opts → { name, deleted, error? }
+Kafka::cluster       %opts → { brokers, topic_count }   # brokers: [{id, host, port}]
+Kafka::lag           $group, %opts → dies       # deferred in v0.2.x
+Kafka::create_topic  $name, %opts → { created, errors } # opts: partitions, replication
+Kafka::delete_topic  $name, %opts → { deleted, errors }
 Kafka::ping          %opts → 1 | ""
 ```
 
-### Helper plumbing
+### Plumbing
 
 ```stryke
-Kafka::helper_path()    → $abs_path
-Kafka::ensure_built()   → $abs_path
-Kafka::version()        → "stryke-kafka-helper X.Y.Z"
+Kafka::version()        → $version_string       # cdylib's CARGO_PKG_VERSION
 ```
 
-## [0x05] Helper protocol
+## [0x05] FFI layer
+
+Each `Kafka::*` wrapper builds a JSON args dict and calls a sibling
+`kafka__*` symbol resolved out of `libstryke_kafka.{dylib,so}`. The
+cdylib is dlopened in-process on first `use Kafka` (via stryke's
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
+points: `kafka__pkg_version`, `kafka__ping`, `kafka__cluster`,
+`kafka__topics`, `kafka__describe`, `kafka__groups`, `kafka__produce`,
+`kafka__produce_many`, `kafka__consume`, `kafka__create_topic`,
+`kafka__delete_topic`.
+
+Errors come back as a `{error}` JSON payload; the stryke wrapper dies
+with `Kafka::<op>: <reason>`.
+
+<details>
+<summary>v1 wire shape (historical helper binary)</summary>
 
 ```sh
 stryke-kafka-helper -b localhost:9092 produce send my-topic --value=hello
@@ -268,6 +271,8 @@ Output:
 * `topics`, `groups`, `lag` → NDJSON, one row per line
 * `cluster`, `describe`, `create-topic`, `delete-topic`, `ping` → single JSON
 * `ping` also prints `ok brokers=N topics=N` on stdout, exit 0
+
+</details>
 
 ## [0x06] Tests
 
@@ -311,23 +316,18 @@ stryke-kafka/
   stryke.toml                      # stryke package manifest
   Cargo.toml                       # Rust helper crate manifest
   Makefile
-  src/
-    main.rs                        # CLI dispatch
-    common.rs                      # config + output helpers
-    produce.rs                     # producer commands
-    consume.rs                     # consumer commands
-    admin.rs                       # admin + metadata + lag
+  src/lib.rs                       # single-file cdylib
   lib/
     Kafka.stk                      # `use Kafka`
-  bin/
-    kafka.stk                      # `kafka` CLI
-    kafka-build.stk
   t/
     test_kafka.stk                 # live round-trip
+    test_stryke_kafka_surface.stk
   examples/
     produce_one.stk
     tail_topic.stk
     group_lag.stk
+    discover.stk
+    topics.stk
   .github/workflows/
     ci.yml                         # cargo + bitnami/kafka service for live tests
     release.yml                    # cross-compile + GH release on tag push
@@ -335,7 +335,7 @@ stryke-kafka/
 
 ## [0x09] Roadmap
 
-| v1 (this release) | v2+ |
+| v1 (helper era) | v2+ |
 |---|---|
 | Produce / consume / admin / lag | Schema Registry (Avro / Protobuf) |
 | SASL / SSL config flags | Streams DSL (joins, windowed agg) |
