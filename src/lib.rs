@@ -497,6 +497,72 @@ mod tests {
         });
     }
 
+    /// A comma-separated multi-broker list must pass through to librdkafka
+    /// VERBATIM — no trimming, splitting, de-duping, or reordering.
+    /// librdkafka's `bootstrap.servers` is itself a raw CSV string; any
+    /// massaging here (a well-intentioned `.trim()`, a split/rejoin to
+    /// "normalize", or whitespace collapsing) would corrupt a valid
+    /// multi-broker config. The interior spaces around `b:2` are
+    /// deliberately preserved to catch exactly such a normalization
+    /// regression — the function's contract is byte-identity, not
+    /// "a reasonable broker list".
+    #[test]
+    fn brokers_multibroker_csv_passes_through_byte_identical() {
+        with_env(|| {
+            // KAFKA_BROKERS is cleared by with_env, so opts must win as-is.
+            let raw = "host-a:9092, host-b:9092 ,host-c:9092";
+            assert_eq!(
+                brokers_from_opts(&json!({ "brokers": raw })),
+                raw,
+                "broker CSV must reach librdkafka unmodified (no trim/split/rejoin)"
+            );
+        });
+    }
+
+    /// The producer cache is the crate's entire reason to exist (module
+    /// doc: "The v1 helper rebuilt the producer per fork — defeating
+    /// producer batching/compression entirely"). A cache HIT must return
+    /// the stored handle WITHOUT calling `cfg.create()` again and WITHOUT
+    /// inserting a second entry. We pre-seed the global `PRODUCERS` map
+    /// with a real `FutureProducer` under a unique broker key, then call
+    /// `get_producer`; the early `if let Some(p) = map.get(&brokers)`
+    /// branch (lib.rs ~83) must fire. The invariant we pin: the map still
+    /// holds exactly ONE entry for that key (no rebuild-and-reinsert,
+    /// no duplicate). A regression that drops the lookup and always
+    /// rebuilds would silently destroy batching on every produce.
+    ///
+    /// Uses a unique, syntactically-valid-but-unroutable broker so it can
+    /// never collide with another test's cache entry and never opens a
+    /// socket (`FutureProducer::create` constructs lazily — `send` is what
+    /// would connect, and we never call it).
+    #[test]
+    fn get_producer_cache_hit_does_not_rebuild() {
+        with_env(|| {
+            let brokers = "stryke-kafka-cache-test-unique-host:9092";
+            // Seed the cache directly with a real producer handle.
+            let seeded: FutureProducer = base_config(brokers)
+                .create()
+                .expect("FutureProducer::create must be a non-connecting constructor");
+            producers().lock().insert(brokers.to_string(), seeded);
+
+            let before = producers().lock().keys().filter(|k| *k == brokers).count();
+            assert_eq!(before, 1, "precondition: exactly one seeded entry");
+
+            // Cache HIT path: must return Ok and must NOT insert a duplicate.
+            let got = get_producer(&json!({ "brokers": brokers }));
+            assert!(got.is_ok(), "cache hit must succeed: {:?}", got.err());
+
+            let after = producers().lock().keys().filter(|k| *k == brokers).count();
+            assert_eq!(
+                after, 1,
+                "cache hit must reuse the stored producer, not rebuild-and-reinsert"
+            );
+
+            // Cleanup: don't leak the unique entry into other tests' view.
+            producers().lock().remove(brokers);
+        });
+    }
+
     #[test]
     fn base_config_sets_bootstrap_servers() {
         let cfg = base_config("host-a:9092,host-b:9092");
