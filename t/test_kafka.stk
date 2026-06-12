@@ -21,7 +21,7 @@ if ($alive) {
 
     # 1. cluster metadata
     val $cl = Kafka::cluster()
-    assert_gt $cl->{broker_count}, 0, "cluster: broker_count > 0"
+    assert_gt scalar(@{ $cl->{brokers} }), 0, "cluster: broker_count > 0"
 
     # 2. create topic
     val $c = Kafka::create_topic($topic, partitions => 2, replication => 1)
@@ -29,7 +29,7 @@ if ($alive) {
 
     # 3. topics list (find ours)
     val @tlist = Kafka::topics()
-    val $found_topic = grep { $_->{name} eq $topic } @tlist
+    val $found_topic = grep { $_ eq $topic } @tlist
     assert_ok $found_topic, "topics: contains our topic"
 
     # 4. produce one
@@ -40,7 +40,7 @@ if ($alive) {
     val $rm = Kafka::produce_many(
         [ map { { topic => $topic, value => "msg-$_", key => "k$_" } } (1:5) ]
     )
-    assert_eq $rm->{sent}, 5, "produce_many: sent=5"
+    assert_eq $rm, 5, "produce_many: sent=5"
 
     # 6. consume back (from beginning) — at least 6 messages total
     val @msgs = Kafka::consume(
