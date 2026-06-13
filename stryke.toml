@@ -17,11 +17,18 @@ exports = [
     "kafka__topics",
     "kafka__describe",
     "kafka__groups",
+    "kafka__lag",
+    "kafka__watermarks",
+    "kafka__offsets_for_times",
     "kafka__produce",
     "kafka__produce_many",
     "kafka__consume",
     "kafka__create_topic",
     "kafka__delete_topic",
+    "kafka__create_partitions",
+    "kafka__describe_configs",
+    "kafka__alter_configs",
+    "kafka__delete_groups",
 ]
 
 [scripts]

@@ -24,13 +24,17 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::admin::{
+    AdminClient, AdminOptions, AlterConfig, NewPartitions, NewTopic, ResourceSpecifier,
+    TopicReplication,
+};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::Message;
+use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
+use rdkafka::{Offset, TopicPartitionList};
 use serde_json::{json, Value};
 use tokio::runtime::{Builder, Runtime};
 
@@ -109,6 +113,183 @@ fn make_base_consumer(opts: &Value, group: Option<&str>) -> Result<BaseConsumer>
         cfg.set("group.id", "stryke-kafka-snapshot");
     }
     Ok(cfg.create()?)
+}
+
+// ── payload framing + headers ────────────────────────────────────────────────
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(B64[(n >> 18 & 0x3f) as usize] as char);
+        out.push(B64[(n >> 12 & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    fn val(c: u8) -> Result<u32> {
+        match c {
+            b'A'..=b'Z' => Ok((c - b'A') as u32),
+            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(anyhow!("invalid base64 character")),
+        }
+    }
+    let s: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if !s.len().is_multiple_of(4) {
+        return Err(anyhow!("base64 length must be a multiple of 4"));
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for chunk in s.chunks(4) {
+        let pad = chunk.iter().filter(|&&c| c == b'=').count();
+        let n = (val(chunk[0])? << 18)
+            | (val(chunk[1])? << 12)
+            | (if chunk[2] == b'=' { 0 } else { val(chunk[2])? } << 6)
+            | (if chunk[3] == b'=' { 0 } else { val(chunk[3])? });
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Decode a produce payload/key string into bytes per `encoding`
+/// (default "utf8"; "base64"/"hex" carry arbitrary bytes).
+fn decode_field(value: &str, encoding: &str) -> Result<Vec<u8>> {
+    match encoding {
+        "utf8" | "text" => Ok(value.as_bytes().to_vec()),
+        "base64" | "b64" => base64_decode(value),
+        "hex" => {
+            if !value.len().is_multiple_of(2) {
+                return Err(anyhow!("hex payload must have an even length"));
+            }
+            (0..value.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&value[i..i + 2], 16)
+                        .map_err(|_| anyhow!("invalid hex byte at offset {i}"))
+                })
+                .collect()
+        }
+        other => Err(anyhow!("unknown encoding: {other} (want utf8|base64|hex)")),
+    }
+}
+
+/// Encode received bytes into a stryke string per `encoding` (default "utf8",
+/// lossy; "base64"/"hex" preserve arbitrary bytes).
+fn encode_field(bytes: &[u8], encoding: &str) -> String {
+    match encoding {
+        "base64" | "b64" => base64_encode(bytes),
+        "hex" => {
+            let mut s = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+                s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+            }
+            s
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Build librdkafka `OwnedHeaders` from a JSON object `{ key: "value" }`.
+/// Header values are always UTF-8 strings here (the common case); returns None
+/// when no headers are present so callers can skip attaching them.
+fn build_headers(opts: &Value) -> Option<OwnedHeaders> {
+    let obj = opts.get("headers")?.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut headers = OwnedHeaders::new_with_capacity(obj.len());
+    for (k, v) in obj {
+        let value = v.as_str().unwrap_or("");
+        headers = headers.insert(Header {
+            key: k,
+            value: Some(value),
+        });
+    }
+    Some(headers)
+}
+
+/// Snapshot a consumed message's headers into a JSON object (UTF-8 lossy).
+fn headers_to_json(msg: &rdkafka::message::BorrowedMessage<'_>) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(hs) = msg.headers() {
+        for i in 0..hs.count() {
+            let h = hs.get(i);
+            let v = h.value.map(|b| String::from_utf8_lossy(b).into_owned());
+            obj.insert(h.key.to_string(), json!(v));
+        }
+    }
+    Value::Object(obj)
+}
+
+/// Map a JSON `{type, name}` spec to an owned resource specifier pair so the
+/// borrow can outlive the lookup. type: "topic" | "broker" | "group".
+fn resource_parts(opts: &Value) -> Result<(String, Option<i32>)> {
+    let kind = opts
+        .get("resource_type")
+        .and_then(Value::as_str)
+        .unwrap_or("topic");
+    match kind {
+        "topic" | "group" => {
+            let name = opts
+                .get("resource_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("missing resource_name"))?;
+            Ok((format!("{kind}:{name}"), None))
+        }
+        "broker" => {
+            let id = opts
+                .get("resource_name")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .ok_or_else(|| anyhow!("broker resource_name must be a broker id"))?;
+            Ok((format!("broker:{id}"), Some(id as i32)))
+        }
+        other => Err(anyhow!(
+            "unknown resource_type `{other}` (want topic|broker|group)"
+        )),
+    }
+}
+
+/// Build a `ResourceSpecifier` from the parsed `{kind}:{name}` tag + broker id.
+fn make_specifier<'a>(tag: &'a str, broker_id: Option<i32>) -> Result<ResourceSpecifier<'a>> {
+    let (kind, name) = tag
+        .split_once(':')
+        .ok_or_else(|| anyhow!("bad resource tag"))?;
+    Ok(match kind {
+        "topic" => ResourceSpecifier::Topic(name),
+        "group" => ResourceSpecifier::Group(name),
+        "broker" => ResourceSpecifier::Broker(broker_id.unwrap_or_default()),
+        _ => return Err(anyhow!("bad resource kind")),
+    })
 }
 
 // ── ops ─────────────────────────────────────────────────────────────────────
@@ -204,13 +385,29 @@ async fn op_produce(opts: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing topic"))?
         .to_string();
-    let value = opts["value"].as_str().unwrap_or("").to_string();
-    let key = opts["key"].as_str().map(String::from);
+    let encoding = opts["encoding"].as_str().unwrap_or("utf8");
+    let value = decode_field(opts["value"].as_str().unwrap_or(""), encoding)?;
+    let key = match opts["key"].as_str() {
+        Some(k) => Some(decode_field(k, encoding)?),
+        None => None,
+    };
+    let partition = opts["partition"].as_i64().map(|p| p as i32);
+    let timestamp = opts["timestamp"].as_i64();
+    let headers = build_headers(&opts);
     let producer = get_producer(&opts)?;
-    let key_owned = key.unwrap_or_default();
-    let mut record: FutureRecord<String, String> = FutureRecord::to(&topic).payload(&value);
-    if !key_owned.is_empty() {
-        record = record.key(&key_owned);
+
+    let mut record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&value);
+    if let Some(k) = &key {
+        record = record.key(k.as_slice());
+    }
+    if let Some(p) = partition {
+        record = record.partition(p);
+    }
+    if let Some(ts) = timestamp {
+        record = record.timestamp(ts);
+    }
+    if let Some(h) = headers {
+        record = record.headers(h);
     }
     let delivery = producer
         .send(record, Duration::from_secs(10))
@@ -232,15 +429,46 @@ async fn op_produce_many(opts: Value) -> Result<Value> {
         .as_array()
         .ok_or_else(|| anyhow!("missing rows (array of {{key?, value}} objects)"))?
         .clone();
+    // Default encoding applies to every row; a row may override with its own
+    // `encoding`. Each row may also carry key, partition, and headers.
+    let default_encoding = opts["encoding"].as_str().unwrap_or("utf8").to_string();
     let producer = get_producer(&opts)?;
     let mut sent = 0i64;
     let mut errors = Vec::new();
     for row in &rows {
-        let value = row.get("value").and_then(|v| v.as_str()).unwrap_or("");
-        let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let mut record: FutureRecord<str, str> = FutureRecord::to(&topic).payload(value);
-        if !key.is_empty() {
-            record = record.key(key);
+        let encoding = row
+            .get("encoding")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&default_encoding);
+        let value = match decode_field(
+            row.get("value").and_then(|v| v.as_str()).unwrap_or(""),
+            encoding,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(e.to_string());
+                continue;
+            }
+        };
+        let key = match row.get("key").and_then(|v| v.as_str()) {
+            Some(k) => match decode_field(k, encoding) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    errors.push(e.to_string());
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let mut record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&value);
+        if let Some(k) = &key {
+            record = record.key(k.as_slice());
+        }
+        if let Some(p) = row.get("partition").and_then(|v| v.as_i64()) {
+            record = record.partition(p as i32);
+        }
+        if let Some(h) = build_headers(row) {
+            record = record.headers(h);
         }
         match producer.send(record, Duration::from_secs(10)).await {
             Ok(_) => sent += 1,
@@ -261,6 +489,10 @@ async fn op_consume(opts: Value) -> Result<Value> {
     let limit = opts["limit"].as_u64().unwrap_or(10) as usize;
     let timeout_ms = opts["timeout_ms"].as_u64().unwrap_or(5000);
     let group = opts["group"].as_str();
+    let encoding = opts["encoding"].as_str().unwrap_or("utf8");
+    // Commit offsets after draining (only meaningful with an explicit group so
+    // the next consume resumes past these messages).
+    let commit = opts["commit"].as_bool().unwrap_or(false);
     // Snapshot-style: subscribe to topic, poll up to `limit` messages or
     // until `timeout_ms` runs out. Streaming consumption is deferred.
     let consumer = make_base_consumer(&opts, group)?;
@@ -276,27 +508,28 @@ async fn op_consume(opts: Value) -> Result<Value> {
         }
         match consumer.poll(Timeout::After(remaining)) {
             Some(Ok(m)) => {
-                let key = m
-                    .key()
-                    .and_then(|k| std::str::from_utf8(k).ok())
-                    .map(String::from);
-                let value = m
-                    .payload()
-                    .and_then(|v| std::str::from_utf8(v).ok())
-                    .map(String::from);
+                let key = m.key().map(|k| encode_field(k, encoding));
+                let value = m.payload().map(|v| encode_field(v, encoding));
                 out.push(json!({
                     "topic": m.topic(),
                     "partition": m.partition(),
                     "offset": m.offset(),
+                    "timestamp": m.timestamp().to_millis(),
                     "key": key,
                     "value": value,
+                    "headers": headers_to_json(&m),
                 }));
             }
             Some(Err(e)) => return Err(anyhow!("consumer error: {}", e)),
             None => break,
         }
     }
-    Ok(json!({"messages": out}))
+    if commit && group.is_some() && !out.is_empty() {
+        consumer
+            .commit_consumer_state(CommitMode::Sync)
+            .context("committing consumer offsets")?;
+    }
+    Ok(json!({"messages": out, "committed": commit && group.is_some()}))
 }
 
 async fn op_create_topic(opts: Value) -> Result<Value> {
@@ -306,8 +539,21 @@ async fn op_create_topic(opts: Value) -> Result<Value> {
         .to_string();
     let partitions = opts["partitions"].as_i64().unwrap_or(1) as i32;
     let replication = opts["replication"].as_i64().unwrap_or(1) as i32;
+    // Optional topic config (`retention.ms`, `cleanup.policy`, …). Held as
+    // owned strings so the &str borrows in NewTopic outlive the build.
+    let config: Vec<(String, String)> = opts["config"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     let admin = get_admin(&opts)?;
-    let topic = NewTopic::new(&name, partitions, TopicReplication::Fixed(replication));
+    let mut topic = NewTopic::new(&name, partitions, TopicReplication::Fixed(replication));
+    for (k, v) in &config {
+        topic = topic.set(k, v);
+    }
     let results = admin.create_topics(&[topic], &AdminOptions::new()).await?;
     let mut created = Vec::new();
     let mut errors = Vec::new();
@@ -327,6 +573,215 @@ async fn op_delete_topic(opts: Value) -> Result<Value> {
         .to_string();
     let admin = get_admin(&opts)?;
     let results = admin.delete_topics(&[&name], &AdminOptions::new()).await?;
+    let mut deleted = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(n) => deleted.push(n),
+            Err((n, e)) => errors.push(format!("{}: {}", n, e)),
+        }
+    }
+    Ok(json!({"deleted": deleted, "errors": errors}))
+}
+
+/// Enumerate a topic's partition ids from broker metadata.
+fn topic_partition_ids(consumer: &BaseConsumer, topic: &str) -> Result<Vec<i32>> {
+    let md = consumer.fetch_metadata(Some(topic), Timeout::After(Duration::from_secs(5)))?;
+    let t = md
+        .topics()
+        .iter()
+        .find(|t| t.name() == topic)
+        .ok_or_else(|| anyhow!("topic `{topic}` not found"))?;
+    Ok(t.partitions().iter().map(|p| p.id()).collect())
+}
+
+async fn op_watermarks(opts: Value) -> Result<Value> {
+    let topic = opts["topic"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing topic"))?
+        .to_string();
+    let consumer = make_base_consumer(&opts, None)?;
+    // A specific partition, or all partitions of the topic.
+    let parts: Vec<i32> = match opts["partition"].as_i64() {
+        Some(p) => vec![p as i32],
+        None => topic_partition_ids(&consumer, &topic)?,
+    };
+    let mut out = Vec::new();
+    let mut total = 0i64;
+    for p in parts {
+        let (low, high) =
+            consumer.fetch_watermarks(&topic, p, Timeout::After(Duration::from_secs(5)))?;
+        total += high - low;
+        out.push(json!({"partition": p, "low": low, "high": high, "count": high - low}));
+    }
+    Ok(json!({"topic": topic, "partitions": out, "total": total}))
+}
+
+async fn op_lag(opts: Value) -> Result<Value> {
+    let group = opts["group"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing group"))?
+        .to_string();
+    let topic = opts["topic"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing topic (lag is reported per topic)"))?
+        .to_string();
+    let consumer = make_base_consumer(&opts, Some(&group))?;
+    let parts = topic_partition_ids(&consumer, &topic)?;
+    // Committed offsets for the group across the topic's partitions.
+    let mut tpl = TopicPartitionList::new();
+    for p in &parts {
+        tpl.add_partition(&topic, *p);
+    }
+    let committed = consumer.committed_offsets(tpl, Timeout::After(Duration::from_secs(5)))?;
+    let mut rows = Vec::new();
+    let mut total_lag = 0i64;
+    for elem in committed.elements() {
+        let p = elem.partition();
+        let (_, high) =
+            consumer.fetch_watermarks(&topic, p, Timeout::After(Duration::from_secs(5)))?;
+        let committed_offset = match elem.offset() {
+            Offset::Offset(o) => o,
+            _ => 0, // no commit yet → treat as 0 (lag = full backlog)
+        };
+        let lag = (high - committed_offset).max(0);
+        total_lag += lag;
+        rows.push(json!({
+            "partition": p,
+            "committed": committed_offset,
+            "high": high,
+            "lag": lag,
+        }));
+    }
+    Ok(json!({"group": group, "topic": topic, "partitions": rows, "total_lag": total_lag}))
+}
+
+async fn op_offsets_for_times(opts: Value) -> Result<Value> {
+    let topic = opts["topic"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing topic"))?
+        .to_string();
+    let timestamp = opts["timestamp"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("missing timestamp (epoch millis)"))?;
+    let consumer = make_base_consumer(&opts, None)?;
+    let parts = topic_partition_ids(&consumer, &topic)?;
+    let mut tpl = TopicPartitionList::new();
+    for p in &parts {
+        tpl.add_partition_offset(&topic, *p, Offset::Offset(timestamp))
+            .context("seeding offsets_for_times request")?;
+    }
+    let resolved = consumer.offsets_for_times(tpl, Timeout::After(Duration::from_secs(5)))?;
+    let rows: Vec<Value> = resolved
+        .elements()
+        .iter()
+        .map(|e| {
+            let off = match e.offset() {
+                Offset::Offset(o) => Some(o),
+                _ => None, // no message at/after the timestamp
+            };
+            json!({"partition": e.partition(), "offset": off})
+        })
+        .collect();
+    Ok(json!({"topic": topic, "timestamp": timestamp, "partitions": rows}))
+}
+
+async fn op_create_partitions(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?
+        .to_string();
+    let count = opts["partitions"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("missing partitions (new total partition count)"))?
+        as usize;
+    let admin = get_admin(&opts)?;
+    let np = NewPartitions::new(&name, count);
+    let results = admin.create_partitions(&[np], &AdminOptions::new()).await?;
+    let mut ok = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(n) => ok.push(n),
+            Err((n, e)) => errors.push(format!("{}: {}", n, e)),
+        }
+    }
+    Ok(json!({"topic": name, "altered": ok, "errors": errors}))
+}
+
+async fn op_describe_configs(opts: Value) -> Result<Value> {
+    let (tag, broker_id) = resource_parts(&opts)?;
+    let admin = get_admin(&opts)?;
+    let spec = make_specifier(&tag, broker_id)?;
+    let results = admin
+        .describe_configs(&[spec], &AdminOptions::new())
+        .await?;
+    let mut resources = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(cr) => {
+                let entries: Vec<Value> = cr
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "name": e.name,
+                            "value": e.value,
+                            "read_only": e.is_read_only,
+                            "default": e.is_default,
+                            "sensitive": e.is_sensitive,
+                        })
+                    })
+                    .collect();
+                resources
+                    .push(json!({"resource": format!("{:?}", cr.specifier), "entries": entries}));
+            }
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    Ok(json!({"resources": resources, "errors": errors}))
+}
+
+async fn op_alter_configs(opts: Value) -> Result<Value> {
+    let (tag, broker_id) = resource_parts(&opts)?;
+    let entries: Vec<(String, String)> = opts["entries"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing entries (object of config key => value)"))?
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    let admin = get_admin(&opts)?;
+    let spec = make_specifier(&tag, broker_id)?;
+    let mut cfg = AlterConfig::new(spec);
+    for (k, v) in &entries {
+        cfg = cfg.set(k, v);
+    }
+    let results = admin.alter_configs(&[cfg], &AdminOptions::new()).await?;
+    let mut ok = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(spec) => ok.push(format!("{:?}", spec)),
+            Err((spec, e)) => errors.push(format!("{:?}: {}", spec, e)),
+        }
+    }
+    Ok(json!({"altered": ok, "errors": errors}))
+}
+
+async fn op_delete_groups(opts: Value) -> Result<Value> {
+    let groups: Vec<String> = opts["groups"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing groups (array of group ids)"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if groups.is_empty() {
+        return Err(anyhow!("groups must be a non-empty array of group ids"));
+    }
+    let admin = get_admin(&opts)?;
+    let refs: Vec<&str> = groups.iter().map(String::as_str).collect();
+    let results = admin.delete_groups(&refs, &AdminOptions::new()).await?;
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
     for r in results {
@@ -437,6 +892,41 @@ pub extern "C" fn kafka__create_topic(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__delete_topic(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_delete_topic)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__watermarks(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_watermarks)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__lag(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_lag)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__offsets_for_times(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_offsets_for_times)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__create_partitions(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_create_partitions)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__describe_configs(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_describe_configs)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__alter_configs(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_alter_configs)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__delete_groups(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_delete_groups)
 }
 
 #[cfg(test)]
@@ -920,5 +1410,105 @@ mod tests {
             Some("missing topic"),
             "exact contract string required"
         );
+    }
+
+    // ── new-surface helper + validation coverage ─────────────────────────────
+
+    #[test]
+    fn base64_round_trips_and_hex_field_codec() {
+        let raw = [0u8, 1, 2, 255, 254, 128, b'k'];
+        assert_eq!(base64_decode(&base64_encode(&raw)).unwrap(), raw);
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        // field codecs: utf8 default, base64, hex round-trip arbitrary bytes
+        assert_eq!(decode_field("00ff2a", "hex").unwrap(), vec![0u8, 255, 42]);
+        assert_eq!(encode_field(&[0u8, 255, 42], "hex"), "00ff2a");
+        assert_eq!(decode_field("TWFu", "base64").unwrap(), b"Man");
+        assert_eq!(decode_field("hi", "utf8").unwrap(), b"hi");
+        assert!(
+            decode_field("zzz", "snappy").is_err(),
+            "unknown encoding must error"
+        );
+    }
+
+    #[test]
+    fn build_headers_from_object_and_absent() {
+        // No headers key → None so the producer skips attaching.
+        assert!(build_headers(&json!({"topic": "t"})).is_none());
+        assert!(build_headers(&json!({"headers": {}})).is_none());
+        let h =
+            build_headers(&json!({"headers": {"a": "1", "b": "2"}})).expect("two headers built");
+        assert_eq!(h.count(), 2);
+    }
+
+    #[test]
+    fn resource_parts_and_specifier() {
+        // topic default
+        let (tag, id) = resource_parts(&json!({"resource_name": "orders"})).unwrap();
+        assert_eq!(tag, "topic:orders");
+        assert_eq!(id, None);
+        assert!(matches!(
+            make_specifier(&tag, id).unwrap(),
+            ResourceSpecifier::Topic("orders")
+        ));
+        // broker id parsed
+        let (tag, id) =
+            resource_parts(&json!({"resource_type": "broker", "resource_name": 3})).unwrap();
+        assert_eq!(id, Some(3));
+        assert!(matches!(
+            make_specifier(&tag, id).unwrap(),
+            ResourceSpecifier::Broker(3)
+        ));
+        // missing name for topic errors
+        assert!(resource_parts(&json!({"resource_type": "topic"})).is_err());
+        // unknown type errors
+        assert!(
+            resource_parts(&json!({"resource_type": "cluster", "resource_name": "x"})).is_err()
+        );
+    }
+
+    /// New broker-touching exports must validate required args BEFORE building
+    /// any librdkafka client — a typo must surface instantly, not hang on a
+    /// broker handshake. Pins the validate-before-network contract for each.
+    #[test]
+    fn new_ops_validate_before_broker_contact() {
+        let cases: &[(extern "C" fn(*const c_char) -> *const c_char, &str, &str)] = &[
+            (kafka__watermarks, r#"{}"#, "missing topic"),
+            (kafka__lag, r#"{"topic":"t"}"#, "missing group"),
+            (kafka__lag, r#"{"group":"g"}"#, "missing topic"),
+            (
+                kafka__offsets_for_times,
+                r#"{"topic":"t"}"#,
+                "missing timestamp",
+            ),
+            (
+                kafka__create_partitions,
+                r#"{"name":"t"}"#,
+                "missing partitions",
+            ),
+            (kafka__describe_configs, r#"{}"#, "missing resource_name"),
+            (
+                kafka__alter_configs,
+                r#"{"resource_name":"t"}"#,
+                "missing entries",
+            ),
+            (kafka__delete_groups, r#"{}"#, "missing groups"),
+        ];
+        for (f, arg, want) in cases {
+            let start = std::time::Instant::now();
+            let v = ffi_call_with_json_arg(*f, arg);
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "validation for {want} took too long — build-before-validate regression?"
+            );
+            let err = v
+                .as_object()
+                .and_then(|o| o.get("error"))
+                .and_then(|e| e.as_str())
+                .unwrap_or("");
+            assert!(
+                err.contains(want),
+                "expected `{want}` for arg {arg}; got: {err}"
+            );
+        }
     }
 }

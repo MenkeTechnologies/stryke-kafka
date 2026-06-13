@@ -16,9 +16,10 @@
 
 > *"Streams without the JVM."*
 
-Apache Kafka client for stryke — producer, consumer, and topic /
-cluster admin (consumer-group lag deferred in v0.2.x). Opt-in package
-tier, kept out of the stryke core binary so the daily-driver install
+Apache Kafka client for stryke — producer (keys, headers, partitions,
+binary payloads), consumer (offset commit, headers), consumer-group lag /
+watermarks / time-based offsets, and topic / cluster / config admin. Opt-in
+package tier, kept out of the stryke core binary so the daily-driver install
 stays slim.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-redis`](https://github.com/MenkeTechnologies/stryke-redis) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
@@ -125,9 +126,9 @@ my $info = Kafka::describe "new-topic"
 p to_json $info
 ```
 
-> `Kafka::lag` (consumer-group lag) is deferred in the v0.2.x cdylib —
-> it dies until a dedicated lag op ships. Derive lag client-side from
-> `Kafka::groups` + topic metadata if needed.
+> `Kafka::lag $group, topic => "..."` reports per-partition lag (committed
+> offset vs. high watermark). `Kafka::watermarks` and
+> `Kafka::offsets_for_times` cover raw offset introspection.
 
 Brokers — pass on every call OR set the env var:
 
@@ -192,9 +193,11 @@ Kafka::produce       $topic, $value, %opts → { topic, partition, offset }
 Kafka::produce_many  \@rows, %opts → $sent          # requires topic => $name
 ```
 
-`produce` opts: `key`.
-`produce_many` rows: `{ value, key? }`; the target topic is the
-required `topic => "..."` named arg.
+`produce` opts: `key`, `partition`, `timestamp` (epoch millis),
+`headers => { k => v }`, `encoding` (`utf8` default, `base64`, `hex`).
+`produce_many` rows: `{ value, key?, partition?, headers?, encoding? }`;
+the target topic is the required `topic => "..."` named arg (an `encoding`
+opt sets the default for all rows).
 
 ### Consumer
 
@@ -203,33 +206,48 @@ Kafka::consume         $topic, %opts → @messages
 Kafka::consume_stream  $topic, %opts → $count             # callback per msg
 ```
 
-Opts: `group`, `limit` (default 10), `timeout_ms` (default 5000).
-Snapshot-style: subscribe, poll up to `limit` messages or until
-`timeout_ms` runs out. `consume_stream` pulls the same snapshot and
-fires `callback` per message.
+Opts: `group`, `limit` (default 10), `timeout_ms` (default 5000),
+`encoding` (`utf8`/`base64`/`hex`), `commit` (commit offsets after the
+drain — needs `group`). Snapshot-style: subscribe, poll up to `limit`
+messages or until `timeout_ms` runs out. `consume_stream` pulls the same
+snapshot and fires `callback` per message.
 
 Message shape:
 
 ```
 {
-  topic, partition, offset,
-  key,                         # null if missing
-  value,                       # UTF-8 text (null if not valid UTF-8)
+  topic, partition, offset, timestamp,
+  key,                         # framed per `encoding` (null if missing)
+  value,                       # framed per `encoding` (utf8 lossy by default)
+  headers,                     # { k => v } object
 }
+```
+
+### Consumer offsets
+
+```stryke
+Kafka::lag                $group, %opts → { group, topic, partitions, total_lag }
+                                          # opts: topic (required)
+Kafka::watermarks         $topic, %opts → { topic, partitions, total }
+                                          # partitions: [{partition, low, high, count}]
+Kafka::offsets_for_times  $topic, $ts_ms, %opts → { topic, timestamp, partitions }
 ```
 
 ### Admin
 
 ```stryke
-Kafka::topics        %opts → @names
-Kafka::describe      $topic, %opts → { topic, partition_count, partitions }
-                                     # partitions: [{id, leader, replicas, isr}]
-Kafka::groups        %opts → @groups            # [{name, state, ...}]
-Kafka::cluster       %opts → { brokers, topic_count }   # brokers: [{id, host, port}]
-Kafka::lag           $group, %opts → dies       # deferred in v0.2.x
-Kafka::create_topic  $name, %opts → { created, errors } # opts: partitions, replication
-Kafka::delete_topic  $name, %opts → { deleted, errors }
-Kafka::ping          %opts → 1 | ""
+Kafka::topics             %opts → @names
+Kafka::describe           $topic, %opts → { topic, partition_count, partitions }
+                                          # partitions: [{id, leader, replicas, isr}]
+Kafka::groups             %opts → @groups            # [{name, state, ...}]
+Kafka::cluster            %opts → { brokers, topic_count }   # brokers: [{id, host, port}]
+Kafka::create_topic       $name, %opts → { created, errors } # opts: partitions, replication, config
+Kafka::delete_topic       $name, %opts → { deleted, errors }
+Kafka::create_partitions  $name, $partitions, %opts → { topic, altered, errors }
+Kafka::describe_configs   %opts → { resources, errors }      # resource_type, resource_name
+Kafka::alter_configs      %opts → { altered, errors }        # + entries => { k => v }
+Kafka::delete_groups      \@groups, %opts → { deleted, errors }
+Kafka::ping               %opts → 1 | ""
 ```
 
 ### Plumbing
@@ -335,12 +353,16 @@ stryke-kafka/
 
 ## [0x09] Roadmap
 
-| v1 (helper era) | v2+ |
+Shipped: produce with keys/headers/partitions/timestamps + binary framing,
+consume with headers/binary/offset-commit, consumer-group lag, watermarks,
+time-based offset lookup, topic config on create, create_partitions,
+describe/alter configs, and delete_groups.
+
+| Open | Later |
 |---|---|
-| Produce / consume / admin / lag | Schema Registry (Avro / Protobuf) |
-| SASL / SSL config flags | Streams DSL (joins, windowed agg) |
-| One-shot consume per call | Long-running consumer daemon over a Unix socket |
-| Text / binary / JSON value modes | Avro / Protobuf value modes via Schema Registry |
+| SASL / SSL connection options | Schema Registry (Avro / Protobuf) value modes |
+| Long-running consumer daemon (callback streaming) | Streams DSL (joins, windowed agg) |
+| `delete_records` (truncate to offset) | Transactional producer (EOS) |
 
 ## [0xFF] License
 

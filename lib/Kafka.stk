@@ -10,11 +10,13 @@
 ## cdylib holds one shared tokio runtime + a FutureProducer cache per
 ## brokers tuple. Producer batching now works as designed.
 ##
-## v0.2.0 surface: 11 core ops (ping/cluster/topics/describe/groups,
-## produce/produce_many, consume snapshot, create_topic/delete_topic).
-## Streaming consume (long-running consumer-group with callback) is
-## deferred — needs a callback FFI shape that v1's `FfiSig::StrToStr`
-## doesn't model.
+## Surface: cluster/metadata (ping/cluster/topics/describe/groups),
+## consumer offsets (lag/watermarks/offsets_for_times), produce/produce_many
+## (keys, headers, partition, timestamp, binary encoding), consume snapshot
+## (headers, binary encoding, offset commit), and admin (create/delete topic,
+## create_partitions, describe/alter configs, delete_groups). Long-running
+## callback streaming consumption is still deferred — it needs a callback FFI
+## shape the blocking `StrToStr` bridge doesn't model.
 
 package Kafka
 
@@ -74,35 +76,61 @@ fn Kafka::groups (%opts) {
     @{ $o->{groups} }
 }
 
-## Lag computation is deferred — derive client-side from groups + topic
-## metadata if needed.
+## Per-partition consumer lag for $group on a topic (opts: topic required).
+## Returns { group, topic, partitions => [{ partition, committed, high, lag }],
+## total_lag }.
 fn Kafka::lag ($group, %opts) {
-    die "Kafka::lag: dedicated lag op deferred in v0.2.0 cdylib"
+    die "Kafka::lag: topic => 'name' required" unless defined $opts{topic}
+    Kafka::_decode("lag",
+        kafka__lag(to_json(Kafka::_req({ group => $group, topic => $opts{topic} }, \%opts))))
+}
+
+## Low/high watermark offsets for a topic (opts: partition to scope to one).
+## Returns { topic, partitions => [{ partition, low, high, count }], total }.
+fn Kafka::watermarks ($topic, %opts) {
+    Kafka::_decode("watermarks",
+        kafka__watermarks(to_json(Kafka::_req({ topic => $topic, partition => $opts{partition} }, \%opts))))
+}
+
+## Look up the first offset at/after $timestamp (epoch millis) per partition.
+fn Kafka::offsets_for_times ($topic, $timestamp, %opts) {
+    Kafka::_decode("offsets_for_times",
+        kafka__offsets_for_times(to_json(Kafka::_req({ topic => $topic, timestamp => $timestamp }, \%opts))))
 }
 
 # ── produce ─────────────────────────────────────────────────────────
 
-## Send one record; returns { topic, partition, offset }.
+## Send one record; returns { topic, partition, offset }. opts: key, partition,
+## timestamp (epoch millis), headers => { k => v }, encoding (utf8|base64|hex).
 fn Kafka::produce ($topic, $value, %opts) {
     val $r = Kafka::_req(
-        { topic => $topic, value => $value, key => $opts{key} }, \%opts)
+        { topic => $topic, value => $value, key => $opts{key},
+          partition => $opts{partition}, timestamp => $opts{timestamp},
+          headers => $opts{headers}, encoding => $opts{encoding} },
+        \%opts)
     Kafka::_decode("produce", kafka__produce(to_json($r)))
 }
 
-## $rows: arrayref of { value, key? } hashrefs.
+## $rows: arrayref of { value, key?, partition?, headers?, encoding? } hashrefs.
+## opts: topic (required), encoding (default for all rows).
 fn Kafka::produce_many ($rows, %opts) {
     die "Kafka::produce_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
     die "Kafka::produce_many: topic => 'name' required" unless defined $opts{topic}
-    val $r = Kafka::_req({ topic => $opts{topic}, rows => $rows }, \%opts)
+    val $r = Kafka::_req(
+        { topic => $opts{topic}, rows => $rows, encoding => $opts{encoding} }, \%opts)
     Kafka::_decode("produce_many", kafka__produce_many(to_json($r)))->{sent}
 }
 
 # ── consume (snapshot) ──────────────────────────────────────────────
 
-## Snapshot pull up to `limit` messages within `timeout_ms`.
+## Snapshot pull up to `limit` messages within `timeout_ms`. opts: group,
+## encoding (utf8|base64|hex), commit (commit offsets after drain — needs
+## group). Each message carries topic/partition/offset/timestamp/key/value/headers.
 fn Kafka::consume ($topic, %opts) {
     val $r = Kafka::_req(
-        { topic => $topic, limit => $opts{limit}, timeout_ms => $opts{timeout_ms}, group => $opts{group} },
+        { topic => $topic, limit => $opts{limit}, timeout_ms => $opts{timeout_ms},
+          group => $opts{group}, encoding => $opts{encoding},
+          commit => ($opts{commit} ? \1 : \0) },
         \%opts
     )
     val $o = Kafka::_decode("consume", kafka__consume(to_json($r)))
@@ -124,10 +152,11 @@ fn Kafka::consume_stream ($topic, %opts) {
 
 # ── topic admin ─────────────────────────────────────────────────────
 
-## Create topic; opts: partitions, replication.
+## Create topic; opts: partitions, replication, config => { key => value }.
 fn Kafka::create_topic ($name, %opts) {
     val $r = Kafka::_req(
-        { name => $name, partitions => $opts{partitions}, replication => $opts{replication} },
+        { name => $name, partitions => $opts{partitions},
+          replication => $opts{replication}, config => $opts{config} },
         \%opts
     )
     Kafka::_decode("create_topic", kafka__create_topic(to_json($r)))
@@ -137,5 +166,36 @@ fn Kafka::create_topic ($name, %opts) {
 fn Kafka::delete_topic ($name, %opts) {
     Kafka::_decode("delete_topic",
         kafka__delete_topic(to_json(Kafka::_req({ name => $name }, \%opts))))
+}
+
+## Increase $name to $partitions total partitions.
+fn Kafka::create_partitions ($name, $partitions, %opts) {
+    Kafka::_decode("create_partitions",
+        kafka__create_partitions(to_json(Kafka::_req({ name => $name, partitions => $partitions }, \%opts))))
+}
+
+## Describe config of a resource. opts: resource_type (topic|broker|group,
+## default topic), resource_name. Returns { resources => [...], errors }.
+fn Kafka::describe_configs (%opts) {
+    Kafka::_decode("describe_configs",
+        kafka__describe_configs(to_json(Kafka::_req(
+            { resource_type => $opts{resource_type}, resource_name => $opts{resource_name} }, \%opts))))
+}
+
+## Alter config of a resource. opts: resource_type, resource_name,
+## entries => { key => value }.
+fn Kafka::alter_configs (%opts) {
+    die "Kafka::alter_configs: entries => { ... } required" unless defined $opts{entries}
+    Kafka::_decode("alter_configs",
+        kafka__alter_configs(to_json(Kafka::_req(
+            { resource_type => $opts{resource_type}, resource_name => $opts{resource_name},
+              entries => $opts{entries} }, \%opts))))
+}
+
+## Delete consumer groups by id. $groups is an arrayref of group ids.
+fn Kafka::delete_groups ($groups, %opts) {
+    die "Kafka::delete_groups: groups must be arrayref" unless ref($groups) eq "ARRAY"
+    Kafka::_decode("delete_groups",
+        kafka__delete_groups(to_json(Kafka::_req({ groups => $groups }, \%opts))))
 }
 
