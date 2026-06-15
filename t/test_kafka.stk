@@ -57,4 +57,23 @@ if ($alive) {
     assert_ok 1, "delete_topic completed without dying"
 }
 
+# ── pure helpers (no broker — always run) ────────────────────────────
+assert_ok Kafka::valid_topic_name("orders.us-east_1")->{valid}, "valid_topic_name: accepts legal name"
+val $bad = Kafka::valid_topic_name("has space")
+assert_eq $bad->{valid}, 0, "valid_topic_name: rejects spaces"
+assert_match qr/illegal/, $bad->{reason}, "valid_topic_name: reason explains why"
+
+assert_eq Kafka::is_internal_topic("__consumer_offsets"), 1, "is_internal_topic: __ prefix"
+assert_eq Kafka::is_internal_topic("orders"), 0,            "is_internal_topic: normal topic"
+
+val @brokers = Kafka::parse_brokers("b1:9092, b2:9093 ,b3")
+assert_eq scalar(@brokers), 3,      "parse_brokers: three brokers"
+assert_eq $brokers[0]{host}, "b1",  "parse_brokers: host"
+assert_eq $brokers[1]{port}, 9093,  "parse_brokers: trimmed port"
+
+assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
+assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
+assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"
+assert_dies fn { Kafka::format_offset("nonsense") }, "format_offset: rejects unknown name"
+
 test_run

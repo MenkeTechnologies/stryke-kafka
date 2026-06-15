@@ -256,16 +256,28 @@ Kafka::ping               %opts → 1 | ""
 Kafka::version()        → $version_string       # cdylib's CARGO_PKG_VERSION
 ```
 
+### Pure helpers (no broker)
+
+```stryke
+Kafka::valid_topic_name($name)  → { name, valid, reason }   # 1-249 chars of [a-zA-Z0-9._-], not . / ..
+Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
+Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list
+Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
+```
+
 ## [0x05] FFI layer
 
 Each `Kafka::*` wrapper builds a JSON args dict and calls a sibling
 `kafka__*` symbol resolved out of `libstryke_kafka.{dylib,so}`. The
 cdylib is dlopened in-process on first `use Kafka` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
-points: `kafka__pkg_version`, `kafka__ping`, `kafka__cluster`,
-`kafka__topics`, `kafka__describe`, `kafka__groups`, `kafka__produce`,
-`kafka__produce_many`, `kafka__consume`, `kafka__create_topic`,
-`kafka__delete_topic`.
+`pkg::commands::try_load_ffi_for` resolver hook). Its exports cover the
+admin/produce/consume surface (`kafka__pkg_version`, `kafka__ping`,
+`kafka__cluster`, `kafka__topics`, `kafka__describe`, `kafka__groups`,
+`kafka__produce`, `kafka__consume`, `kafka__create_topic`,
+`kafka__delete_topic`, …) plus broker-free helpers
+(`kafka__valid_topic_name`, `kafka__is_internal_topic`,
+`kafka__parse_brokers`, `kafka__format_offset`). The authoritative list is
+`[ffi].exports` in `stryke.toml`.
 
 Errors come back as a `{error}` JSON payload; the stryke wrapper dies
 with `Kafka::<op>: <reason>`.

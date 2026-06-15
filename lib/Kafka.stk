@@ -199,3 +199,29 @@ fn Kafka::delete_groups ($groups, %opts) {
         kafka__delete_groups(to_json(Kafka::_req({ groups => $groups }, \%opts))))
 }
 
+# ── pure helpers (no broker) ──────────────────────────────────────────
+
+## Validate a topic name against the broker rule (1-249 chars of
+## [a-zA-Z0-9._-], not "." / ".."). Returns { name, valid, reason }; reason
+## is undef when valid.
+fn Kafka::valid_topic_name ($name) {
+    Kafka::_decode("valid_topic_name", kafka__valid_topic_name(to_json({ name => $name })))
+}
+
+## True if $name is a Kafka internal topic (the "__" prefix).
+fn Kafka::is_internal_topic ($name) {
+    Kafka::_decode("is_internal_topic", kafka__is_internal_topic(to_json({ name => $name })))->{internal}
+}
+
+## Parse a bootstrap.servers string into a broker list [{ host, port }].
+fn Kafka::parse_brokers ($brokers) {
+    @{ Kafka::_decode("parse_brokers", kafka__parse_brokers(to_json({ brokers => $brokers })))->{brokers} }
+}
+
+## Map a special offset sentinel to its name, or a name to its sentinel:
+## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
+fn Kafka::format_offset ($offset_or_name) {
+    val $req = ($offset_or_name =~ /^-?\d+$/) ? { offset => $offset_or_name + 0 } : { name => $offset_or_name }
+    Kafka::_decode("format_offset", kafka__format_offset(to_json($req)))
+}
+

@@ -835,6 +835,93 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
     drop(CString::from_raw(p));
 }
 
+// ── pure helpers (no broker) ─────────────────────────────────────────────────
+
+/// Validate a Kafka topic name against the broker's rule: 1–249 chars from
+/// `[a-zA-Z0-9._-]`, and not `.` or `..`. Returns `{valid, reason}` — `reason`
+/// is null when valid. Pure.
+fn op_valid_topic_name(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let reason: Option<&str> = if name.is_empty() {
+        Some("empty")
+    } else if name == "." || name == ".." {
+        Some("reserved (`.` / `..`)")
+    } else if name.len() > 249 {
+        Some("longer than 249 characters")
+    } else if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        Some("illegal character (allowed: a-z A-Z 0-9 . _ -)")
+    } else {
+        None
+    };
+    Ok(json!({"name": name, "valid": reason.is_none(), "reason": reason}))
+}
+
+/// Whether a topic is a Kafka internal topic (the `__` prefix, e.g.
+/// `__consumer_offsets`, `__transaction_state`). Pure.
+fn op_is_internal_topic(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    Ok(json!({"name": name, "internal": name.starts_with("__")}))
+}
+
+/// Parse a `bootstrap.servers` string `host1:9092,host2:9092` into a broker
+/// list `[{host, port}]`. Whitespace around entries is trimmed. Pure.
+fn op_parse_brokers(opts: Value) -> Result<Value> {
+    let s = opts
+        .get("brokers")
+        .or_else(|| opts.get("bootstrap"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing brokers"))?;
+    let brokers: Vec<Value> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(|hp| match hp.rsplit_once(':') {
+            Some((h, p)) => match p.parse::<u32>() {
+                Ok(port) => json!({"host": h, "port": port}),
+                Err(_) => json!({"host": hp, "port": Value::Null}),
+            },
+            None => json!({"host": hp, "port": Value::Null}),
+        })
+        .collect();
+    if brokers.is_empty() {
+        return Err(anyhow!("no brokers in `{s}`"));
+    }
+    let count = brokers.len();
+    Ok(json!({"brokers": brokers, "count": count}))
+}
+
+/// Map between Kafka's special offset sentinels and their names: `-1` ⇄
+/// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
+/// name. Pass `offset` (number) or `name` (string). Pure.
+fn op_format_offset(opts: Value) -> Result<Value> {
+    if let Some(off) = opts.get("offset").and_then(Value::as_i64) {
+        let name = match off {
+            -1 => Some("latest"),
+            -2 => Some("earliest"),
+            _ => None,
+        };
+        return Ok(json!({"offset": off, "name": name}));
+    }
+    if let Some(name) = opts.get("name").and_then(Value::as_str) {
+        let off = match name.to_ascii_lowercase().as_str() {
+            "latest" | "end" => -1,
+            "earliest" | "beginning" | "start" => -2,
+            other => return Err(anyhow!("unknown offset name `{other}` (latest|earliest)")),
+        };
+        return Ok(json!({"name": name, "offset": off}));
+    }
+    Err(anyhow!("format_offset requires `offset` or `name`"))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -927,6 +1014,26 @@ pub extern "C" fn kafka__alter_configs(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__delete_groups(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_delete_groups)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__valid_topic_name(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_valid_topic_name(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__is_internal_topic(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_is_internal_topic(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__parse_brokers(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_brokers(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__format_offset(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_format_offset(opts) })
 }
 
 #[cfg(test)]
@@ -1510,5 +1617,78 @@ mod tests {
                 "expected `{want}` for arg {arg}; got: {err}"
             );
         }
+    }
+
+    // ── pure helpers (no broker) ─────────────────────────────────────────────
+
+    #[test]
+    fn valid_topic_name_accepts_legal_and_flags_each_violation() {
+        assert_eq!(
+            op_valid_topic_name(json!({"name": "orders.us-east_1"})).unwrap()["valid"],
+            json!(true)
+        );
+        // Each rejection carries a specific reason.
+        let dot = op_valid_topic_name(json!({"name": ".."})).unwrap();
+        assert_eq!(dot["valid"], json!(false));
+        assert!(dot["reason"].as_str().unwrap().contains("reserved"));
+        let bad = op_valid_topic_name(json!({"name": "has space"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert!(bad["reason"].as_str().unwrap().contains("illegal"));
+        let long = op_valid_topic_name(json!({"name": "a".repeat(250)})).unwrap();
+        assert_eq!(long["valid"], json!(false));
+        assert!(long["reason"].as_str().unwrap().contains("249"));
+        // 249 chars is the boundary — still valid.
+        assert_eq!(
+            op_valid_topic_name(json!({"name": "a".repeat(249)})).unwrap()["valid"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn is_internal_topic_detects_double_underscore_prefix() {
+        assert_eq!(
+            op_is_internal_topic(json!({"name": "__consumer_offsets"})).unwrap()["internal"],
+            json!(true)
+        );
+        assert_eq!(
+            op_is_internal_topic(json!({"name": "orders"})).unwrap()["internal"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn parse_brokers_splits_host_port_list() {
+        let v = op_parse_brokers(json!({"brokers": "b1:9092, b2:9093 ,b3"})).unwrap();
+        let brokers = v["brokers"].as_array().unwrap();
+        assert_eq!(v["count"], json!(3));
+        assert_eq!(brokers[0]["host"], json!("b1"));
+        assert_eq!(brokers[0]["port"], json!(9092));
+        assert_eq!(brokers[1]["port"], json!(9093), "whitespace trimmed");
+        assert_eq!(brokers[2]["port"], Value::Null, "portless broker → null");
+        assert!(op_parse_brokers(json!({"brokers": ""})).is_err());
+    }
+
+    #[test]
+    fn format_offset_maps_sentinels_both_directions() {
+        assert_eq!(
+            op_format_offset(json!({"offset": -1})).unwrap()["name"],
+            json!("latest")
+        );
+        assert_eq!(
+            op_format_offset(json!({"offset": -2})).unwrap()["name"],
+            json!("earliest")
+        );
+        assert_eq!(
+            op_format_offset(json!({"offset": 42})).unwrap()["name"],
+            Value::Null,
+            "concrete offset has no sentinel name"
+        );
+        assert_eq!(
+            op_format_offset(json!({"name": "EARLIEST"})).unwrap()["offset"],
+            json!(-2),
+            "name lookup is case-insensitive"
+        );
+        assert!(op_format_offset(json!({"name": "whoknows"})).is_err());
+        assert!(op_format_offset(json!({})).is_err());
     }
 }
