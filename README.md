@@ -263,7 +263,8 @@ Kafka::valid_topic_name($name)  → { name, valid, reason }   # 1-249 chars of [
 Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
 Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list
 Kafka::build_brokers(\@brokers) → $str                      # {host,port} list → bootstrap.servers; inverse of parse_brokers
-Kafka::partition_for_key($key, $partitions) → { partition, hash }   # default partitioner: toPositive(murmur2(key)) % partitions
+Kafka::partition_for_key($key, $partitions) → { partition, hash }   # JVM default partitioner: toPositive(murmur2(key)) % partitions
+Kafka::partition_for_key_crc32($key, $partitions) → { partition, crc32 }   # librdkafka `consistent` partitioner: crc32(key) % partitions (non-JVM clients)
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
 ```
 

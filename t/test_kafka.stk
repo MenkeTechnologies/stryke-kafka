@@ -86,6 +86,16 @@ assert_eq Kafka::partition_for_key("foobar", 10)->{partition}, 6, "partition_for
 assert_lt Kafka::partition_for_key("user-42", 4)->{partition}, 4, "partition_for_key: result < partition count"
 assert_dies fn { Kafka::partition_for_key("x", 0) }, "partition_for_key: rejects zero partitions"
 
+# partition_for_key_crc32: librdkafka `consistent` partitioner (crc32 % partitions).
+# crc32("foobar") = 0x9EF61F95 = 2666930069; 2666930069 % 10 = 9.
+val $ck = Kafka::partition_for_key_crc32("foobar", 10)
+assert_eq $ck->{crc32},     2666930069, "partition_for_key_crc32: crc32 matches zlib reference"
+assert_eq $ck->{partition}, 9,          "partition_for_key_crc32: crc32 % partitions"
+# The two partitioners disagree for the same key/topology (murmur2 → 6, crc32 → 9).
+assert_ne Kafka::partition_for_key("foobar", 10)->{partition}, $ck->{partition}, "partition_for_key_crc32: differs from murmur2 partitioner"
+assert_lt Kafka::partition_for_key_crc32("user-42", 4)->{partition}, 4, "partition_for_key_crc32: result < partition count"
+assert_dies fn { Kafka::partition_for_key_crc32("x", 0) }, "partition_for_key_crc32: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"

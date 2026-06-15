@@ -994,6 +994,48 @@ fn op_partition_for_key(opts: Value) -> Result<Value> {
     Ok(json!({"partition": partition, "hash": hash}))
 }
 
+/// Standard CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320, init/xorout
+/// 0xFFFFFFFF) — the same `rd_crc32` librdkafka hashes keys with. Bitwise rather
+/// than table-driven for readability; key hashing is never hot. The published
+/// CRC-32/ISO-HDLC check value `crc32("123456789") == 0xCBF43926` pins it.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// Predict the partition for a keyed record under librdkafka's `consistent`
+/// partitioner — `crc32(key) % partitions` — the default for every non-JVM
+/// Kafka client (C/C++, Python, Go, Rust). Distinct from `partition_for_key`,
+/// which models the JVM client's murmur2 partitioner; the two disagree for the
+/// same key. opts: `key` (string), `partitions` (count > 0). Returns
+/// `{partition, crc32}`. Pure.
+fn op_partition_for_key_crc32(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing key"))?;
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions"))?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let crc = crc32_ieee(key.as_bytes());
+    let partition = crc as u64 % partitions;
+    Ok(json!({"partition": partition, "crc32": crc}))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1134,6 +1176,11 @@ pub extern "C" fn kafka__build_brokers(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__partition_for_key(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_partition_for_key(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__partition_for_key_crc32(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_partition_for_key_crc32(opts) })
 }
 
 #[no_mangle]
@@ -1819,6 +1866,32 @@ mod tests {
             assert!(part < p, "partition {part} must be < {p}");
         }
         assert!(op_partition_for_key(json!({"key": "x", "partitions": 0})).is_err());
+    }
+
+    #[test]
+    fn crc32_matches_standard_iso_hdlc_check_value() {
+        // Published CRC-32/ISO-HDLC check value for "123456789" is 0xCBF43926.
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32_ieee(b""), 0);
+    }
+
+    #[test]
+    fn partition_for_key_crc32_uses_consistent_partitioner() {
+        // librdkafka `consistent`: crc32(key) % partitions, unsigned (no
+        // toPositive masking). crc32("foobar") = 0x9EF61F95 = 2666930069.
+        let v = op_partition_for_key_crc32(json!({"key": "foobar", "partitions": 10})).unwrap();
+        assert_eq!(v["crc32"], json!(0x9EF6_1F95u32));
+        assert_eq!(v["partition"], json!(2_666_930_069u64 % 10));
+        // The crc32 and murmur2 partitioners disagree for the same key/topology —
+        // that's the whole point of exposing both.
+        let murmur = op_partition_for_key(json!({"key": "foobar", "partitions": 10})).unwrap();
+        assert_ne!(v["partition"], murmur["partition"]);
+        // Deterministic and always in [0, partitions).
+        for p in 1u64..=8 {
+            let r = op_partition_for_key_crc32(json!({"key": "user-42", "partitions": p})).unwrap();
+            assert!(r["partition"].as_u64().unwrap() < p);
+        }
+        assert!(op_partition_for_key_crc32(json!({"key": "x", "partitions": 0})).is_err());
     }
 
     #[test]
