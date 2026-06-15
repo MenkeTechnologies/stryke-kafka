@@ -899,6 +899,38 @@ fn op_parse_brokers(opts: Value) -> Result<Value> {
     Ok(json!({"brokers": brokers, "count": count}))
 }
 
+/// Build a `bootstrap.servers` string from a broker list — the inverse of
+/// `parse_brokers`. opts: `brokers`, an array of `{host, port?}` (or bare host
+/// strings). A broker with a port becomes `host:port`, otherwise just `host`.
+/// Joined with `,`. Pure.
+fn op_build_brokers(opts: Value) -> Result<Value> {
+    let list = opts
+        .get("brokers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing brokers (array)"))?;
+    let mut parts = Vec::new();
+    for b in list {
+        let host = if let Some(s) = b.as_str() {
+            s.to_string()
+        } else {
+            let h = b
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("broker entry missing host"))?;
+            match b.get("port").and_then(Value::as_u64) {
+                Some(port) => format!("{h}:{port}"),
+                None => h.to_string(),
+            }
+        };
+        parts.push(host);
+    }
+    if parts.is_empty() {
+        return Err(anyhow!("broker list is empty"));
+    }
+    Ok(json!({"bootstrap": parts.join(",")}))
+}
+
 /// Kafka's `Utils.murmur2` — the 32-bit MurmurHash2 variant (seed `0x9747b28c`)
 /// that the producer's default partitioner hashes record keys with. Faithful
 /// port: `i32` wrapping arithmetic and logical (`>>>`) shifts, matching the JVM.
@@ -1092,6 +1124,11 @@ pub extern "C" fn kafka__is_internal_topic(args: *const c_char) -> *const c_char
 #[no_mangle]
 pub extern "C" fn kafka__parse_brokers(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_brokers(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__build_brokers(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_brokers(opts) })
 }
 
 #[no_mangle]
@@ -1734,6 +1771,25 @@ mod tests {
         assert_eq!(brokers[1]["port"], json!(9093), "whitespace trimmed");
         assert_eq!(brokers[2]["port"], Value::Null, "portless broker → null");
         assert!(op_parse_brokers(json!({"brokers": ""})).is_err());
+    }
+
+    #[test]
+    fn build_brokers_inverts_parse_brokers() {
+        // Parse → build round-trips the bootstrap string (modulo whitespace).
+        let parsed = op_parse_brokers(json!({"brokers": "b1:9092,b2:9093,b3"})).unwrap();
+        let built = op_build_brokers(json!({"brokers": parsed["brokers"]})).unwrap();
+        assert_eq!(built["bootstrap"], json!("b1:9092,b2:9093,b3"));
+        // Accepts {host,port} objects and bare host strings, mixed.
+        assert_eq!(
+            op_build_brokers(
+                json!({"brokers": [{"host": "h1", "port": 9092}, "h2", {"host": "h3"}]})
+            )
+            .unwrap()["bootstrap"],
+            json!("h1:9092,h2,h3")
+        );
+        // Missing host and empty list error.
+        assert!(op_build_brokers(json!({"brokers": [{"port": 9092}]})).is_err());
+        assert!(op_build_brokers(json!({"brokers": []})).is_err());
     }
 
     #[test]

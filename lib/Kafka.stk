@@ -218,6 +218,13 @@ fn Kafka::parse_brokers ($brokers) {
     @{ Kafka::_decode("parse_brokers", kafka__parse_brokers(to_json({ brokers => $brokers })))->{brokers} }
 }
 
+## Build a bootstrap.servers string from a broker list (arrayref of
+## { host, port } hashrefs or bare host strings) — inverse of parse_brokers.
+## Returns the comma-joined "host:port,…" string.
+fn Kafka::build_brokers ($brokers) {
+    Kafka::_decode("build_brokers", kafka__build_brokers(to_json({ brokers => $brokers })))->{bootstrap}
+}
+
 ## Predict the partition Kafka's default partitioner sends a keyed record to,
 ## client-side: toPositive(murmur2($key)) % $partitions. Returns a hashref
 ## { partition, hash }. Lets you compute partition assignment without a broker.

@@ -71,6 +71,11 @@ assert_eq scalar(@brokers), 3,      "parse_brokers: three brokers"
 assert_eq $brokers[0]{host}, "b1",  "parse_brokers: host"
 assert_eq $brokers[1]{port}, 9093,  "parse_brokers: trimmed port"
 
+# build_brokers: inverse of parse_brokers.
+assert_eq Kafka::build_brokers([ +{ host => "b1", port => 9092 }, +{ host => "b2", port => 9093 } ]), "b1:9092,b2:9093", "build_brokers: {host,port} list → bootstrap"
+assert_eq Kafka::build_brokers([ +{ host => "b3" } ]), "b3", "build_brokers: portless broker is host-only"
+assert_eq Kafka::build_brokers(\@brokers), "b1:9092,b2:9093,b3", "build_brokers: round-trips parse_brokers output"
+
 # partition_for_key: default-partitioner murmur2 hash, verified against Kafka.
 # toPositive(murmur2("foobar")) % 10 = 6; hash is the signed murmur2 value.
 val $pk = Kafka::partition_for_key("foobar", 10)
