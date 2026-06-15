@@ -1036,6 +1036,38 @@ fn op_partition_for_key_crc32(opts: Value) -> Result<Value> {
     Ok(json!({"partition": partition, "crc32": crc}))
 }
 
+/// Java `String.hashCode()` — `s[0]*31^(n-1) + … + s[n-1]` over UTF-16 code
+/// units, wrapping at i32. Kafka keys group-coordinator placement on this exact
+/// hash, so it must match the JVM bit-for-bit (e.g. `"abc"` → 96354).
+fn java_string_hashcode(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for unit in s.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(unit as i32);
+    }
+    h
+}
+
+/// Which `__consumer_offsets` partition holds a consumer group's offsets — and
+/// thus which broker coordinates it. Kafka computes
+/// `Utils.abs(groupId.hashCode()) % offsets.topic.num.partitions`, where
+/// `Utils.abs` is the `& 0x7fffffff` bitmask (NOT `Math.abs`) and the partition
+/// count defaults to 50. opts: `group` (required), `partitions` (default 50).
+/// Returns `{group, partition, hash, partitions}`. Pure.
+fn op_group_coordinator_partition(opts: Value) -> Result<Value> {
+    let group = opts
+        .get("group")
+        .or_else(|| opts.get("group_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing group"))?;
+    let partitions = opts.get("partitions").and_then(Value::as_u64).unwrap_or(50);
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let hash = java_string_hashcode(group);
+    let partition = (hash & 0x7fff_ffff) as u64 % partitions;
+    Ok(json!({"group": group, "partition": partition, "hash": hash, "partitions": partitions}))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1181,6 +1213,14 @@ pub extern "C" fn kafka__partition_for_key(args: *const c_char) -> *const c_char
 #[no_mangle]
 pub extern "C" fn kafka__partition_for_key_crc32(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_partition_for_key_crc32(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__group_coordinator_partition(args: *const c_char) -> *const c_char {
+    ffi_call_async(
+        args,
+        |opts| async move { op_group_coordinator_partition(opts) },
+    )
 }
 
 #[no_mangle]
@@ -1892,6 +1932,45 @@ mod tests {
             assert!(r["partition"].as_u64().unwrap() < p);
         }
         assert!(op_partition_for_key_crc32(json!({"key": "x", "partitions": 0})).is_err());
+    }
+
+    #[test]
+    fn java_string_hashcode_matches_jvm() {
+        // Published JVM String.hashCode values.
+        assert_eq!(java_string_hashcode(""), 0);
+        assert_eq!(java_string_hashcode("a"), 97);
+        assert_eq!(java_string_hashcode("abc"), 96354);
+        assert_eq!(java_string_hashcode("test"), 3_556_498);
+    }
+
+    #[test]
+    fn group_coordinator_partition_matches_kafka_formula() {
+        // Utils.abs(hashCode) % 50 — verified against a JVM-hashCode oracle.
+        let p = |g: &str| {
+            op_group_coordinator_partition(json!({ "group": g })).unwrap()["partition"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(p("abc"), 4, "abc → hashCode 96354 → partition 4 of 50");
+        assert_eq!(p("test"), 48);
+        assert_eq!(p("my-consumer-group"), 13);
+        // The hash is the raw (signed) JVM hashCode.
+        assert_eq!(
+            op_group_coordinator_partition(json!({"group": "abc"})).unwrap()["hash"],
+            json!(96354)
+        );
+        // Default partition count is 50; an explicit count is honored.
+        assert_eq!(
+            op_group_coordinator_partition(json!({"group": "abc"})).unwrap()["partitions"],
+            json!(50)
+        );
+        for parts in 1u64..=64 {
+            let v =
+                op_group_coordinator_partition(json!({"group": "g", "partitions": parts})).unwrap();
+            assert!(v["partition"].as_u64().unwrap() < parts);
+        }
+        assert!(op_group_coordinator_partition(json!({"group": "g", "partitions": 0})).is_err());
+        assert!(op_group_coordinator_partition(json!({})).is_err());
     }
 
     #[test]

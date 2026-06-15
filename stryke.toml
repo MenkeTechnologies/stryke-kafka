@@ -1,6 +1,6 @@
 [package]
 name = "stryke-kafka"
-version = "0.6.0"
+version = "0.7.0"
 description = "Apache Kafka client for stryke. Produce, consume, admin against any Kafka 0.10+ cluster. cdylib loaded in-process — persistent FutureProducer + AdminClient across calls. Producer batching/compression now works as designed (v1 fork-per-call defeated it)."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -35,6 +35,7 @@ exports = [
     "kafka__build_brokers",
     "kafka__partition_for_key",
     "kafka__partition_for_key_crc32",
+    "kafka__group_coordinator_partition",
     "kafka__format_offset",
 ]
 

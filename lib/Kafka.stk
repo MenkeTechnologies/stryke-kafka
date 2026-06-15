@@ -242,6 +242,15 @@ fn Kafka::partition_for_key_crc32 ($key, $partitions) {
         kafka__partition_for_key_crc32(to_json({ key => $key, partitions => $partitions })))
 }
 
+## Which __consumer_offsets partition (and thus coordinator broker) holds a
+## consumer $group's offsets: Utils.abs(groupId.hashCode()) % $partitions, where
+## Utils.abs is the & 0x7fffffff bitmask and $partitions defaults to 50. Returns
+## a hashref { group, partition, hash, partitions }.
+fn Kafka::group_coordinator_partition ($group, $partitions = 50) {
+    Kafka::_decode("group_coordinator_partition",
+        kafka__group_coordinator_partition(to_json({ group => $group, partitions => $partitions })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {

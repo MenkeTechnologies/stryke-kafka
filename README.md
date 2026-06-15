@@ -265,6 +265,7 @@ Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.serve
 Kafka::build_brokers(\@brokers) → $str                      # {host,port} list → bootstrap.servers; inverse of parse_brokers
 Kafka::partition_for_key($key, $partitions) → { partition, hash }   # JVM default partitioner: toPositive(murmur2(key)) % partitions
 Kafka::partition_for_key_crc32($key, $partitions) → { partition, crc32 }   # librdkafka `consistent` partitioner: crc32(key) % partitions (non-JVM clients)
+Kafka::group_coordinator_partition($group, $partitions=50) → { group, partition, hash, partitions }   # __consumer_offsets partition for a group: abs(groupId.hashCode()) % 50
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
 ```
 

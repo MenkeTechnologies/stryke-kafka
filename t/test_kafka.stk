@@ -96,6 +96,15 @@ assert_ne Kafka::partition_for_key("foobar", 10)->{partition}, $ck->{partition},
 assert_lt Kafka::partition_for_key_crc32("user-42", 4)->{partition}, 4, "partition_for_key_crc32: result < partition count"
 assert_dies fn { Kafka::partition_for_key_crc32("x", 0) }, "partition_for_key_crc32: rejects zero partitions"
 
+# group_coordinator_partition: __consumer_offsets partition = abs(hashCode) % 50.
+# Verified vs a JVM hashCode oracle: "abc"=96354→part 4, "test"=3556498→part 48.
+assert_eq Kafka::group_coordinator_partition("abc")->{partition}, 4,  "group_coordinator_partition: abc → 4 of 50"
+assert_eq Kafka::group_coordinator_partition("test")->{partition}, 48, "group_coordinator_partition: test → 48 of 50"
+assert_eq Kafka::group_coordinator_partition("abc")->{hash}, 96354,   "group_coordinator_partition: raw JVM hashCode"
+assert_eq Kafka::group_coordinator_partition("my-consumer-group")->{partition}, 13, "group_coordinator_partition: realistic group id"
+assert_lt Kafka::group_coordinator_partition("g", 16)->{partition}, 16, "group_coordinator_partition: honors explicit partition count"
+assert_dies fn { Kafka::group_coordinator_partition("g", 0) }, "group_coordinator_partition: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"
