@@ -872,6 +872,33 @@ fn op_is_internal_topic(opts: Value) -> Result<Value> {
     Ok(json!({"name": name, "internal": name.starts_with("__")}))
 }
 
+/// Whether two topic names collide in Kafka's metric namespace. Faithful port of
+/// `Topic.hasCollision`: `unifyCollisionChars` replaces every `.` with `_`, and
+/// two topics collide when their unified forms are equal (e.g. `my.topic` and
+/// `my_topic` both become `my_topic`). Also reports whether each name contains a
+/// collision char (`.` or `_`), per `Topic.hasCollisionChars`. Pure.
+fn op_topics_collide(opts: Value) -> Result<Value> {
+    let a = opts
+        .get("a")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing a"))?;
+    let b = opts
+        .get("b")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing b"))?;
+    let unify = |s: &str| s.replace('.', "_");
+    let has_chars = |s: &str| s.contains('.') || s.contains('_');
+    let unified_a = unify(a);
+    let unified_b = unify(b);
+    Ok(json!({
+        "collide": unified_a == unified_b,
+        "unified_a": unified_a,
+        "unified_b": unified_b,
+        "a_has_collision_chars": has_chars(a),
+        "b_has_collision_chars": has_chars(b),
+    }))
+}
+
 /// Parse a `bootstrap.servers` string `host1:9092,host2:9092` into a broker
 /// list `[{host, port}]`. Whitespace around entries is trimmed. Pure.
 fn op_parse_brokers(opts: Value) -> Result<Value> {
@@ -1193,6 +1220,11 @@ pub extern "C" fn kafka__valid_topic_name(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn kafka__is_internal_topic(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_is_internal_topic(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__topics_collide(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_topics_collide(opts) })
 }
 
 #[no_mangle]
@@ -1846,6 +1878,34 @@ mod tests {
             op_is_internal_topic(json!({"name": "orders"})).unwrap()["internal"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn topics_collide_unifies_periods_to_underscores() {
+        // The canonical metric-namespace collision: `my.topic` vs `my_topic`.
+        let r = op_topics_collide(json!({"a": "my.topic", "b": "my_topic"})).unwrap();
+        assert_eq!(r["collide"], json!(true));
+        assert_eq!(r["unified_a"], json!("my_topic"));
+        assert_eq!(r["unified_b"], json!("my_topic"));
+        assert_eq!(r["a_has_collision_chars"], json!(true));
+        assert_eq!(r["b_has_collision_chars"], json!(true));
+        // Distinct names with no shared unified form do not collide.
+        assert_eq!(
+            op_topics_collide(json!({"a": "orders", "b": "events"})).unwrap()["collide"],
+            json!(false)
+        );
+        // A plain name has no collision chars.
+        assert_eq!(
+            op_topics_collide(json!({"a": "orders", "b": "orders"})).unwrap()
+                ["a_has_collision_chars"],
+            json!(false)
+        );
+        // Multiple periods all unify.
+        assert_eq!(
+            op_topics_collide(json!({"a": "a.b.c", "b": "a_b_c"})).unwrap()["collide"],
+            json!(true)
+        );
+        assert!(op_topics_collide(json!({"a": "x"})).is_err());
     }
 
     #[test]

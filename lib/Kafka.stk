@@ -213,6 +213,13 @@ fn Kafka::is_internal_topic ($name) {
     Kafka::_decode("is_internal_topic", kafka__is_internal_topic(to_json({ name => $name })))->{internal}
 }
 
+## True if topics $a and $b collide in Kafka's metric namespace — i.e. they are
+## equal after every "." is replaced with "_" (e.g. "my.topic" vs "my_topic").
+## Faithful to Topic.hasCollision / unifyCollisionChars.
+fn Kafka::topics_collide ($a, $b) {
+    Kafka::_decode("topics_collide", kafka__topics_collide(to_json({ a => $a, b => $b })))->{collide}
+}
+
 ## Parse a bootstrap.servers string into a broker list [{ host, port }].
 fn Kafka::parse_brokers ($brokers) {
     @{ Kafka::_decode("parse_brokers", kafka__parse_brokers(to_json({ brokers => $brokers })))->{brokers} }

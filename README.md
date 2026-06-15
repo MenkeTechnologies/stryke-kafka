@@ -261,6 +261,7 @@ Kafka::version()        → $version_string       # cdylib's CARGO_PKG_VERSION
 ```stryke
 Kafka::valid_topic_name($name)  → { name, valid, reason }   # 1-249 chars of [a-zA-Z0-9._-], not . / ..
 Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
+Kafka::topics_collide($a, $b)   → 1 | ""                    # metric-namespace collision: equal after `.`→`_` (my.topic vs my_topic)
 Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list
 Kafka::build_brokers(\@brokers) → $str                      # {host,port} list → bootstrap.servers; inverse of parse_brokers
 Kafka::partition_for_key($key, $partitions) → { partition, hash }   # JVM default partitioner: toPositive(murmur2(key)) % partitions
@@ -285,6 +286,7 @@ admin/produce/consume surface (`kafka__pkg_version`, `kafka__ping`,
 `kafka__produce`, `kafka__consume`, `kafka__create_topic`,
 `kafka__delete_topic`, …) plus broker-free helpers
 (`kafka__valid_topic_name`, `kafka__is_internal_topic`,
+`kafka__topics_collide`,
 `kafka__parse_brokers`, `kafka__build_brokers`, `kafka__partition_for_key`,
 `kafka__format_offset`). The authoritative list is
 `[ffi].exports` in `stryke.toml`.

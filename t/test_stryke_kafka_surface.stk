@@ -40,6 +40,7 @@ assert_ok exists &Kafka::delete_groups, "Kafka::delete_groups exists"
 # ── pure helpers (no broker) ──
 assert_ok exists &Kafka::valid_topic_name, "Kafka::valid_topic_name exists"
 assert_ok exists &Kafka::is_internal_topic, "Kafka::is_internal_topic exists"
+assert_ok exists &Kafka::topics_collide, "Kafka::topics_collide exists"
 assert_ok exists &Kafka::parse_brokers, "Kafka::parse_brokers exists"
 assert_ok exists &Kafka::build_brokers, "Kafka::build_brokers exists"
 assert_ok exists &Kafka::partition_for_key, "Kafka::partition_for_key exists"
