@@ -71,6 +71,16 @@ assert_eq scalar(@brokers), 3,      "parse_brokers: three brokers"
 assert_eq $brokers[0]{host}, "b1",  "parse_brokers: host"
 assert_eq $brokers[1]{port}, 9093,  "parse_brokers: trimmed port"
 
+# partition_for_key: default-partitioner murmur2 hash, verified against Kafka.
+# toPositive(murmur2("foobar")) % 10 = 6; hash is the signed murmur2 value.
+val $pk = Kafka::partition_for_key("foobar", 10)
+assert_eq $pk->{hash},      -790332482, "partition_for_key: murmur2 matches Kafka reference"
+assert_eq $pk->{partition}, 6,          "partition_for_key: toPositive % partitions"
+# Same key + same partition count is deterministic and in range.
+assert_eq Kafka::partition_for_key("foobar", 10)->{partition}, 6, "partition_for_key: deterministic"
+assert_lt Kafka::partition_for_key("user-42", 4)->{partition}, 4, "partition_for_key: result < partition count"
+assert_dies fn { Kafka::partition_for_key("x", 0) }, "partition_for_key: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"

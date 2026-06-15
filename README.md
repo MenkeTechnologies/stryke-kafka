@@ -262,8 +262,14 @@ Kafka::version()        → $version_string       # cdylib's CARGO_PKG_VERSION
 Kafka::valid_topic_name($name)  → { name, valid, reason }   # 1-249 chars of [a-zA-Z0-9._-], not . / ..
 Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
 Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list
+Kafka::partition_for_key($key, $partitions) → { partition, hash }   # default partitioner: toPositive(murmur2(key)) % partitions
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
 ```
+
+`partition_for_key` is a faithful port of Kafka's `Utils.murmur2` (seed
+`0x9747b28c`) plus the default partitioner's `toPositive(hash) %
+partitions`, so it predicts a keyed record's partition offline — no broker
+round trip.
 
 ## [0x05] FFI layer
 
@@ -276,7 +282,8 @@ admin/produce/consume surface (`kafka__pkg_version`, `kafka__ping`,
 `kafka__produce`, `kafka__consume`, `kafka__create_topic`,
 `kafka__delete_topic`, …) plus broker-free helpers
 (`kafka__valid_topic_name`, `kafka__is_internal_topic`,
-`kafka__parse_brokers`, `kafka__format_offset`). The authoritative list is
+`kafka__parse_brokers`, `kafka__partition_for_key`,
+`kafka__format_offset`). The authoritative list is
 `[ffi].exports` in `stryke.toml`.
 
 Errors come back as a `{error}` JSON payload; the stryke wrapper dies

@@ -899,6 +899,69 @@ fn op_parse_brokers(opts: Value) -> Result<Value> {
     Ok(json!({"brokers": brokers, "count": count}))
 }
 
+/// Kafka's `Utils.murmur2` — the 32-bit MurmurHash2 variant (seed `0x9747b28c`)
+/// that the producer's default partitioner hashes record keys with. Faithful
+/// port: `i32` wrapping arithmetic and logical (`>>>`) shifts, matching the JVM.
+fn murmur2(data: &[u8]) -> i32 {
+    let length = data.len();
+    let m: i32 = 0x5bd1e995;
+    let r = 24u32;
+    let mut h: i32 = (0x9747b28cu32 as i32) ^ (length as i32);
+    let length4 = length / 4;
+    for i in 0..length4 {
+        let i4 = i * 4;
+        let mut k: i32 = (data[i4] as i32 & 0xff)
+            + ((data[i4 + 1] as i32 & 0xff) << 8)
+            + ((data[i4 + 2] as i32 & 0xff) << 16)
+            + ((data[i4 + 3] as i32 & 0xff) << 24);
+        k = k.wrapping_mul(m);
+        k ^= ((k as u32) >> r) as i32;
+        k = k.wrapping_mul(m);
+        h = h.wrapping_mul(m);
+        h ^= k;
+    }
+    // Tail bytes (switch fall-through in the original): xor remaining bytes high
+    // to low, then a final multiply.
+    let base = length & !3;
+    let rem = length % 4;
+    if rem >= 3 {
+        h ^= (data[base + 2] as i32 & 0xff) << 16;
+    }
+    if rem >= 2 {
+        h ^= (data[base + 1] as i32 & 0xff) << 8;
+    }
+    if rem >= 1 {
+        h ^= data[base] as i32 & 0xff;
+        h = h.wrapping_mul(m);
+    }
+    h ^= ((h as u32) >> 13) as i32;
+    h = h.wrapping_mul(m);
+    h ^= ((h as u32) >> 15) as i32;
+    h
+}
+
+/// Predict which partition Kafka's default partitioner sends a keyed record to,
+/// client-side: `toPositive(murmur2(key)) % partitions`, where `toPositive` is
+/// `hash & 0x7fffffff`. Lets you compute partition assignment offline. opts:
+/// `key` (string), `partitions` (count > 0). Returns `{partition, hash}`. Pure.
+fn op_partition_for_key(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing key"))?;
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions"))?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let hash = murmur2(key.as_bytes());
+    let positive = (hash & 0x7fff_ffff) as u64;
+    let partition = positive % partitions;
+    Ok(json!({"partition": partition, "hash": hash}))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1029,6 +1092,11 @@ pub extern "C" fn kafka__is_internal_topic(args: *const c_char) -> *const c_char
 #[no_mangle]
 pub extern "C" fn kafka__parse_brokers(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_brokers(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__partition_for_key(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_partition_for_key(opts) })
 }
 
 #[no_mangle]
@@ -1666,6 +1734,35 @@ mod tests {
         assert_eq!(brokers[1]["port"], json!(9093), "whitespace trimmed");
         assert_eq!(brokers[2]["port"], Value::Null, "portless broker → null");
         assert!(op_parse_brokers(json!({"brokers": ""})).is_err());
+    }
+
+    #[test]
+    fn murmur2_matches_kafka_reference_vectors() {
+        // Canonical values from Apache Kafka's own UtilsTest.testMurmur2.
+        assert_eq!(murmur2(b"21"), -973_932_308);
+        assert_eq!(murmur2(b"foobar"), -790_332_482);
+        assert_eq!(murmur2(b"a-little-bit-long-string"), -985_981_536);
+        assert_eq!(murmur2(b"a-little-bit-longer-string"), -1_486_304_829);
+        assert_eq!(
+            murmur2(b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8"),
+            -58_897_971
+        );
+    }
+
+    #[test]
+    fn partition_for_key_uses_to_positive_modulo() {
+        // toPositive(murmur2("foobar")) = -790332482 & 0x7fffffff = 1357151166.
+        // 1357151166 % 10 = 6.
+        let v = op_partition_for_key(json!({"key": "foobar", "partitions": 10})).unwrap();
+        assert_eq!(v["hash"], json!(-790_332_482));
+        assert_eq!(v["partition"], json!(6));
+        // Deterministic and always in [0, partitions).
+        for p in 1u64..=8 {
+            let r = op_partition_for_key(json!({"key": "user-42", "partitions": p})).unwrap();
+            let part = r["partition"].as_u64().unwrap();
+            assert!(part < p, "partition {part} must be < {p}");
+        }
+        assert!(op_partition_for_key(json!({"key": "x", "partitions": 0})).is_err());
     }
 
     #[test]

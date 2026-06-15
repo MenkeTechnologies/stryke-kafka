@@ -218,6 +218,14 @@ fn Kafka::parse_brokers ($brokers) {
     @{ Kafka::_decode("parse_brokers", kafka__parse_brokers(to_json({ brokers => $brokers })))->{brokers} }
 }
 
+## Predict the partition Kafka's default partitioner sends a keyed record to,
+## client-side: toPositive(murmur2($key)) % $partitions. Returns a hashref
+## { partition, hash }. Lets you compute partition assignment without a broker.
+fn Kafka::partition_for_key ($key, $partitions) {
+    Kafka::_decode("partition_for_key",
+        kafka__partition_for_key(to_json({ key => $key, partitions => $partitions })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {
