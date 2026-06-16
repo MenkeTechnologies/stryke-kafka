@@ -1102,7 +1102,11 @@ fn op_group_coordinator_partition(opts: Value) -> Result<Value> {
 /// `i < extra`) contiguous partitions — so earlier members absorb the remainder.
 /// opts: `partitions` (count > 0), `consumers` (array of member-id strings).
 /// Returns `{assignment: {member: [partition…]}, partitions, consumers}`. Pure.
-fn op_range_assignment(opts: Value) -> Result<Value> {
+/// Parse and validate the shared inputs of the partition assignors: a positive
+/// `partitions` count and a non-empty `consumers` (alias `members`) array of
+/// string ids, returned sorted (every built-in Kafka assignor lays members out
+/// in sorted member-id order before assigning).
+fn parse_assignment_inputs(opts: &Value) -> Result<(u64, Vec<String>)> {
     let partitions = opts
         .get("partitions")
         .and_then(Value::as_u64)
@@ -1126,8 +1130,12 @@ fn op_range_assignment(opts: Value) -> Result<Value> {
     if members.is_empty() {
         return Err(anyhow!("consumers is empty"));
     }
-    // RangeAssignor sorts member ids before slicing.
     members.sort();
+    Ok((partitions, members))
+}
+
+fn op_range_assignment(opts: Value) -> Result<Value> {
+    let (partitions, members) = parse_assignment_inputs(&opts)?;
     let n = members.len() as u64;
     let base = partitions / n;
     let extra = partitions % n;
@@ -1138,6 +1146,30 @@ fn op_range_assignment(opts: Value) -> Result<Value> {
         let length = base + if i < extra { 1 } else { 0 };
         let parts: Vec<u64> = (start..start + length).collect();
         assignment.insert(member.clone(), json!(parts));
+    }
+    Ok(json!({
+        "assignment": assignment,
+        "partitions": partitions,
+        "consumers": members,
+    }))
+}
+
+/// Kafka's RoundRobinAssignor for a single subscribed topic: lay out partitions
+/// `0..partitions` and assign each in turn to the next member in sorted member-id
+/// order, so partition `p` goes to member `p % n`. Counts land within one of each
+/// other. opts: `partitions` (count) + `consumers`/`members` (array of ids).
+/// Returns `{assignment, partitions, consumers}`. Pure. Companion of
+/// `range_assignment` (a distinct strategy: round-robin vs contiguous ranges).
+fn op_roundrobin_assignment(opts: Value) -> Result<Value> {
+    let (partitions, members) = parse_assignment_inputs(&opts)?;
+    let n = members.len() as u64;
+    let mut assignment = serde_json::Map::new();
+    for member in &members {
+        assignment.insert(member.clone(), json!(Vec::<u64>::new()));
+    }
+    for p in 0..partitions {
+        let member = &members[(p % n) as usize];
+        assignment[member].as_array_mut().unwrap().push(json!(p));
     }
     Ok(json!({
         "assignment": assignment,
@@ -1309,6 +1341,11 @@ pub extern "C" fn kafka__group_coordinator_partition(args: *const c_char) -> *co
 #[no_mangle]
 pub extern "C" fn kafka__range_assignment(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_range_assignment(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__roundrobin_assignment(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_roundrobin_assignment(opts) })
 }
 
 #[no_mangle]
@@ -2119,6 +2156,42 @@ mod tests {
         assert!(op_range_assignment(json!({"partitions": 4})).is_err());
         assert!(op_range_assignment(json!({"partitions": 0, "consumers": ["a"]})).is_err());
         assert!(op_range_assignment(json!({"partitions": 4, "consumers": []})).is_err());
+    }
+
+    #[test]
+    fn roundrobin_assignment_matches_kafka_roundrobin_assignor() {
+        // 7 partitions, 3 consumers: partition p → member p%3, so counts 3/2/2
+        // but interleaved (vs RangeAssignor's contiguous blocks).
+        let v = op_roundrobin_assignment(json!({"partitions": 7, "consumers": ["c0", "c1", "c2"]}))
+            .unwrap();
+        let a = &v["assignment"];
+        assert_eq!(a["c0"], json!([0, 3, 6]));
+        assert_eq!(a["c1"], json!([1, 4]));
+        assert_eq!(a["c2"], json!([2, 5]));
+        // Even split: counts within one, still interleaved.
+        let even = op_roundrobin_assignment(json!({"partitions": 6, "consumers": ["a", "b", "c"]}))
+            .unwrap();
+        assert_eq!(even["assignment"]["a"], json!([0, 3]));
+        assert_eq!(even["assignment"]["b"], json!([1, 4]));
+        assert_eq!(even["assignment"]["c"], json!([2, 5]));
+        // More consumers than partitions: the tail members get nothing.
+        let sparse =
+            op_roundrobin_assignment(json!({"partitions": 2, "consumers": ["x", "y", "z"]}))
+                .unwrap();
+        assert_eq!(sparse["assignment"]["x"], json!([0]));
+        assert_eq!(sparse["assignment"]["y"], json!([1]));
+        assert_eq!(sparse["assignment"]["z"], json!([]));
+        // Member ids are sorted before the round-robin walk.
+        let unsorted =
+            op_roundrobin_assignment(json!({"partitions": 4, "consumers": ["c2", "c0", "c1"]}))
+                .unwrap();
+        assert_eq!(unsorted["assignment"]["c0"], json!([0, 3]));
+        assert_eq!(unsorted["assignment"]["c1"], json!([1]));
+        assert_eq!(unsorted["assignment"]["c2"], json!([2]));
+        // Errors mirror range_assignment (shared input parsing).
+        assert!(op_roundrobin_assignment(json!({"consumers": ["a"]})).is_err());
+        assert!(op_roundrobin_assignment(json!({"partitions": 0, "consumers": ["a"]})).is_err());
+        assert!(op_roundrobin_assignment(json!({"partitions": 4, "consumers": []})).is_err());
     }
 
     #[test]

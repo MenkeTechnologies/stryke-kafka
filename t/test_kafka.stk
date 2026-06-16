@@ -119,6 +119,15 @@ val $sp = Kafka::range_assignment(2, "x", "y", "z")
 assert_eq scalar(@{ $sp->{assignment}{z} }), 0, "range_assignment: surplus consumer gets nothing"
 assert_dies fn { Kafka::range_assignment(0, "a") }, "range_assignment: rejects zero partitions"
 
+# roundrobin_assignment: Kafka RoundRobinAssignor for one topic (interleaved).
+val $rr = Kafka::roundrobin_assignment(7, "c0", "c1", "c2")
+assert_eq join(",", @{ $rr->{assignment}{c0} }), "0,3,6", "roundrobin_assignment: c0 gets every third partition"
+assert_eq join(",", @{ $rr->{assignment}{c1} }), "1,4",   "roundrobin_assignment: c1 interleaved"
+assert_eq join(",", @{ $rr->{assignment}{c2} }), "2,5",   "roundrobin_assignment: c2 interleaved"
+val $rrs = Kafka::roundrobin_assignment(2, "x", "y", "z")
+assert_eq scalar(@{ $rrs->{assignment}{z} }), 0, "roundrobin_assignment: surplus consumer gets nothing"
+assert_dies fn { Kafka::roundrobin_assignment(0, "a") }, "roundrobin_assignment: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"

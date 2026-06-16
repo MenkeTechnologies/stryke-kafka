@@ -268,6 +268,16 @@ fn Kafka::range_assignment ($partitions, @consumers) {
         kafka__range_assignment(to_json({ partitions => $partitions, consumers => \@consumers })))
 }
 
+## Predict a consumer group's partition assignment under Kafka's RoundRobinAssignor
+## for one topic: members are sorted, then partition p is handed to member p%N, so
+## ownership counts land within one of each other (interleaved, unlike the
+## RangeAssignor's contiguous blocks). @consumers is a list of member ids. Returns
+## { assignment => { member => [partition…] }, partitions, consumers }.
+fn Kafka::roundrobin_assignment ($partitions, @consumers) {
+    Kafka::_decode("roundrobin_assignment",
+        kafka__roundrobin_assignment(to_json({ partitions => $partitions, consumers => \@consumers })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {
