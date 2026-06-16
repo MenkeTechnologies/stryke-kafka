@@ -1114,6 +1114,17 @@ fn java_string_hashcode(s: &str) -> i32 {
     h
 }
 
+/// `Utils.abs(id.hashCode()) % partitions` — the coordinator-partition formula
+/// Kafka uses to place both a consumer group on `__consumer_offsets` and a
+/// transactional id on `__transaction_state`. `Utils.abs` is the `& 0x7fffffff`
+/// bitmask (NOT `Math.abs`, which overflows at `i32::MIN`). Returns
+/// `(hashCode, partition)`. Shared by the two coordinator-partition ops.
+fn coordinator_partition(id: &str, partitions: u64) -> (i32, u64) {
+    let hash = java_string_hashcode(id);
+    let partition = (hash & 0x7fff_ffff) as u64 % partitions;
+    (hash, partition)
+}
+
 /// Which `__consumer_offsets` partition holds a consumer group's offsets — and
 /// thus which broker coordinates it. Kafka computes
 /// `Utils.abs(groupId.hashCode()) % offsets.topic.num.partitions`, where
@@ -1130,9 +1141,31 @@ fn op_group_coordinator_partition(opts: Value) -> Result<Value> {
     if partitions == 0 {
         return Err(anyhow!("partitions must be > 0"));
     }
-    let hash = java_string_hashcode(group);
-    let partition = (hash & 0x7fff_ffff) as u64 % partitions;
+    let (hash, partition) = coordinator_partition(group, partitions);
     Ok(json!({"group": group, "partition": partition, "hash": hash, "partitions": partitions}))
+}
+
+/// Which `__transaction_state` partition owns a transactional id — and thus
+/// which broker is its transaction coordinator. Kafka computes
+/// `Utils.abs(transactionalId.hashCode()) % transaction.state.log.num.partitions`,
+/// the same formula as `group_coordinator_partition` but over the transaction
+/// log (also defaulting to 50 partitions). opts: `transactional_id` (or `id`),
+/// `partitions` (default 50). Returns `{transactional_id, partition, hash,
+/// partitions}`. Pure.
+fn op_transaction_coordinator_partition(opts: Value) -> Result<Value> {
+    let id = opts
+        .get("transactional_id")
+        .or_else(|| opts.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing transactional_id"))?;
+    let partitions = opts.get("partitions").and_then(Value::as_u64).unwrap_or(50);
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let (hash, partition) = coordinator_partition(id, partitions);
+    Ok(
+        json!({"transactional_id": id, "partition": partition, "hash": hash, "partitions": partitions}),
+    )
 }
 
 /// Predict a consumer group's partition assignment under Kafka's default
@@ -1381,6 +1414,13 @@ pub extern "C" fn kafka__group_coordinator_partition(args: *const c_char) -> *co
         args,
         |opts| async move { op_group_coordinator_partition(opts) },
     )
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__transaction_coordinator_partition(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move {
+        op_transaction_coordinator_partition(opts)
+    })
 }
 
 #[no_mangle]
@@ -2193,6 +2233,46 @@ mod tests {
         }
         assert!(op_group_coordinator_partition(json!({"group": "g", "partitions": 0})).is_err());
         assert!(op_group_coordinator_partition(json!({})).is_err());
+    }
+
+    #[test]
+    fn transaction_coordinator_partition_uses_the_same_formula() {
+        let p = |id: &str| {
+            op_transaction_coordinator_partition(json!({ "transactional_id": id })).unwrap()
+        };
+        // Same Utils.abs(hashCode) % 50 formula → same result as the group op for
+        // an identical id (verified JVM hashCode 96354 for "abc").
+        assert_eq!(p("abc")["partition"], json!(4));
+        assert_eq!(p("abc")["hash"], json!(96354));
+        assert_eq!(p("abc")["transactional_id"], json!("abc"));
+        // It must agree with group_coordinator_partition for any shared id.
+        for id in ["abc", "test", "my-tx-id", "orders-producer-1"] {
+            let tx =
+                op_transaction_coordinator_partition(json!({ "transactional_id": id })).unwrap();
+            let grp = op_group_coordinator_partition(json!({ "group": id })).unwrap();
+            assert_eq!(
+                tx["partition"], grp["partition"],
+                "tx vs group partition for {id}"
+            );
+        }
+        // `id` is accepted as an alias; default count 50; explicit count honored.
+        assert_eq!(
+            op_transaction_coordinator_partition(json!({"id": "abc"})).unwrap()["partition"],
+            json!(4)
+        );
+        assert_eq!(p("abc")["partitions"], json!(50));
+        for parts in 1u64..=64 {
+            let v = op_transaction_coordinator_partition(
+                json!({"transactional_id": "t", "partitions": parts}),
+            )
+            .unwrap();
+            assert!(v["partition"].as_u64().unwrap() < parts);
+        }
+        assert!(op_transaction_coordinator_partition(
+            json!({"transactional_id": "t", "partitions": 0})
+        )
+        .is_err());
+        assert!(op_transaction_coordinator_partition(json!({})).is_err());
     }
 
     #[test]

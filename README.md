@@ -268,6 +268,7 @@ Kafka::normalize_brokers($str, %opts) → $str                # fill default :90
 Kafka::partition_for_key($key, $partitions) → { partition, hash }   # JVM default partitioner: toPositive(murmur2(key)) % partitions
 Kafka::partition_for_key_crc32($key, $partitions) → { partition, crc32 }   # librdkafka `consistent` partitioner: crc32(key) % partitions (non-JVM clients)
 Kafka::group_coordinator_partition($group, $partitions=50) → { group, partition, hash, partitions }   # __consumer_offsets partition for a group: abs(groupId.hashCode()) % 50
+Kafka::transaction_coordinator_partition($transactional_id, $partitions=50) → { transactional_id, partition, hash, partitions }   # __transaction_state partition: same formula over the transaction log
 Kafka::range_assignment($partitions, @consumers) → { assignment:{member:[partition…]}, partitions, consumers }   # default RangeAssignor: predict a rebalance's partition assignment
 Kafka::roundrobin_assignment($partitions, @consumers) → { assignment:{member:[partition…]}, partitions, consumers }   # RoundRobinAssignor: interleaved (partition p → member p%N)
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest

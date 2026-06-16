@@ -266,6 +266,15 @@ fn Kafka::group_coordinator_partition ($group, $partitions = 50) {
         kafka__group_coordinator_partition(to_json({ group => $group, partitions => $partitions })))
 }
 
+## Which __transaction_state partition (and thus transaction coordinator broker)
+## owns a $transactional_id: Utils.abs(id.hashCode()) % $partitions — same formula
+## as group_coordinator_partition over the transaction log ($partitions defaults
+## to 50). Returns a hashref { transactional_id, partition, hash, partitions }.
+fn Kafka::transaction_coordinator_partition ($transactional_id, $partitions = 50) {
+    Kafka::_decode("transaction_coordinator_partition",
+        kafka__transaction_coordinator_partition(to_json({ transactional_id => $transactional_id, partitions => $partitions })))
+}
+
 ## Predict a consumer group's partition assignment under Kafka's default
 ## RangeAssignor for one topic: members are sorted, then each gets a contiguous
 ## block of $partitions/N (+1 for the first $partitions%N members). @consumers
