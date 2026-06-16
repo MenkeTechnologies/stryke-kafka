@@ -63,6 +63,15 @@ val $bad = Kafka::valid_topic_name("has space")
 assert_eq $bad->{valid}, 0, "valid_topic_name: rejects spaces"
 assert_match qr/illegal/, $bad->{reason}, "valid_topic_name: reason explains why"
 
+# sanitize_topic_name: coerce arbitrary input into a valid topic name.
+assert_eq Kafka::sanitize_topic_name("orders.us-east_1")->{sanitized}, "orders.us-east_1", "sanitize_topic_name: legal name unchanged"
+assert_eq Kafka::sanitize_topic_name("orders.us-east_1")->{changed},   0,                  "sanitize_topic_name: changed flag false when legal"
+assert_eq Kafka::sanitize_topic_name("my topic!")->{sanitized}, "my_topic_", "sanitize_topic_name: illegal chars become _"
+assert_eq Kafka::sanitize_topic_name("..")->{sanitized},        "_",         "sanitize_topic_name: reserved name falls back to replacement"
+assert_eq Kafka::sanitize_topic_name("a b", "-")->{sanitized},  "a-b",       "sanitize_topic_name: custom replacement"
+# The sanitized output always validates.
+assert_ok Kafka::valid_topic_name(Kafka::sanitize_topic_name("a/b:c@d")->{sanitized})->{valid}, "sanitize_topic_name: output passes valid_topic_name"
+
 assert_eq Kafka::is_internal_topic("__consumer_offsets"), 1, "is_internal_topic: __ prefix"
 assert_eq Kafka::is_internal_topic("orders"), 0,            "is_internal_topic: normal topic"
 

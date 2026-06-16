@@ -260,6 +260,7 @@ Kafka::version()        → $version_string       # cdylib's CARGO_PKG_VERSION
 
 ```stryke
 Kafka::valid_topic_name($name)  → { name, valid, reason }   # 1-249 chars of [a-zA-Z0-9._-], not . / ..
+Kafka::sanitize_topic_name($name, $replacement?) → { name, sanitized, changed }   # coerce arbitrary input into a valid topic name (illegal → _, truncate 249, reserved/empty → replacement)
 Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
 Kafka::topics_collide($a, $b)   → 1 | ""                    # metric-namespace collision: equal after `.`→`_` (my.topic vs my_topic)
 Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list

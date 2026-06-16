@@ -862,6 +862,52 @@ fn op_valid_topic_name(opts: Value) -> Result<Value> {
     Ok(json!({"name": name, "valid": reason.is_none(), "reason": reason}))
 }
 
+/// Coerce an arbitrary string into a valid Kafka topic name — every character
+/// outside the legal set `a-z A-Z 0-9 . _ -` is replaced with `replacement`
+/// (default `_`), the result is truncated to the 249-character limit, and the
+/// empty and reserved (`.` / `..`) names fall back to `replacement`. The output
+/// always passes `valid_topic_name`. The generation companion of that validator —
+/// for deriving a topic name from a free-form identifier. opts: `name` (or
+/// `value`, required), `replacement` (default `_`, must be non-empty `[a-zA-Z0-9_-]`).
+/// Returns `{name, sanitized, changed}`. Pure.
+fn op_sanitize_topic_name(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let replacement = opts
+        .get("replacement")
+        .and_then(Value::as_str)
+        .unwrap_or("_");
+    if replacement.is_empty()
+        || !replacement
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(anyhow!(
+            "replacement must be non-empty and only [a-zA-Z0-9_-]"
+        ));
+    }
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push_str(replacement);
+        }
+    }
+    // The result is pure ASCII, so truncating by bytes is char-safe.
+    if out.len() > 249 {
+        out.truncate(249);
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        out = replacement.to_string();
+    }
+    let changed = out != name;
+    Ok(json!({"name": name, "sanitized": out, "changed": changed}))
+}
+
 /// Whether a topic is a Kafka internal topic (the `__` prefix, e.g.
 /// `__consumer_offsets`, `__transaction_state`). Pure.
 fn op_is_internal_topic(opts: Value) -> Result<Value> {
@@ -1406,6 +1452,11 @@ pub extern "C" fn kafka__delete_groups(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__valid_topic_name(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_valid_topic_name(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__sanitize_topic_name(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_sanitize_topic_name(opts) })
 }
 
 #[no_mangle]
@@ -2084,6 +2135,46 @@ mod tests {
             op_valid_topic_name(json!({"name": "a".repeat(249)})).unwrap()["valid"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn sanitize_topic_name_always_produces_a_valid_name() {
+        let san = |n: &str| {
+            op_sanitize_topic_name(json!({ "name": n })).unwrap()["sanitized"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Legal names pass through unchanged.
+        assert_eq!(san("orders.us-east_1"), "orders.us-east_1");
+        let unchanged = op_sanitize_topic_name(json!({"name": "ok-topic"})).unwrap();
+        assert_eq!(unchanged["changed"], json!(false));
+        // Illegal characters become the default `_`.
+        assert_eq!(san("my topic!"), "my_topic_");
+        assert_eq!(san("a/b:c@d"), "a_b_c_d");
+        // The reserved and empty names fall back to the replacement.
+        assert_eq!(san(".."), "_");
+        assert_eq!(san("!"), "_");
+        // Over-long input is truncated to 249 characters.
+        assert_eq!(san(&"a".repeat(300)).len(), 249);
+        // A custom replacement is honored; an illegal one errors.
+        assert_eq!(
+            op_sanitize_topic_name(json!({"name": "a b", "replacement": "-"})).unwrap()
+                ["sanitized"],
+            json!("a-b")
+        );
+        assert!(op_sanitize_topic_name(json!({"name": "x", "replacement": "."})).is_err());
+        assert!(op_sanitize_topic_name(json!({"name": "x", "replacement": ""})).is_err());
+        // Every sanitized result actually validates.
+        for raw in ["my topic!", "..", "", "a/b", "日本語", &"z".repeat(300)] {
+            let s = op_sanitize_topic_name(json!({ "name": raw })).unwrap()["sanitized"].clone();
+            assert_eq!(
+                op_valid_topic_name(json!({ "name": s })).unwrap()["valid"],
+                json!(true),
+                "sanitized {raw:?} should validate"
+            );
+        }
+        assert!(op_sanitize_topic_name(json!({})).is_err());
     }
 
     #[test]

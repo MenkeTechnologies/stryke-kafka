@@ -208,6 +208,15 @@ fn Kafka::valid_topic_name ($name) {
     Kafka::_decode("valid_topic_name", kafka__valid_topic_name(to_json({ name => $name })))
 }
 
+## Coerce an arbitrary string into a valid topic name — illegal characters become
+## $replacement (default "_"), the result is truncated to 249 chars, and the empty
+## and reserved (. / ..) names fall back to $replacement. The output always passes
+## valid_topic_name. Returns a hashref { name, sanitized, changed }.
+fn Kafka::sanitize_topic_name ($name, $replacement = "_") {
+    Kafka::_decode("sanitize_topic_name",
+        kafka__sanitize_topic_name(to_json({ name => $name, replacement => $replacement })))
+}
+
 ## True if $name is a Kafka internal topic (the "__" prefix).
 fn Kafka::is_internal_topic ($name) {
     Kafka::_decode("is_internal_topic", kafka__is_internal_topic(to_json({ name => $name })))->{internal}
