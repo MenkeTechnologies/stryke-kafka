@@ -344,6 +344,18 @@ fn Kafka::replica_assignment ($partitions, $replication_factor, $brokers, %opts)
     })))
 }
 
+## Invert a partition→broker $assignment (the arrayref replica_assignment returns,
+## each entry { partition, replicas => [broker…] }) into a per-broker view — the
+## inverse of replica_assignment. Each broker gains every partition it replicates,
+## and the broker in the first replica position (preferred leader) gains it as a
+## leader too. Useful for checking leadership/load balance. Returns a hashref
+## { brokers => [ { broker, leader, replicas, leader_count, replica_count } ] }
+## sorted by broker id.
+fn Kafka::assignment_by_broker ($assignment) {
+    Kafka::_decode("assignment_by_broker",
+        kafka__assignment_by_broker(to_json({ assignment => $assignment })))
+}
+
 ## Diff two partition assignments ($previous and $current, each a hashref
 ## { consumer => [partition…] }) to plan a rebalance: what each member loses and
 ## gains. For the cooperative protocol, "revoked" is exactly the set to give up

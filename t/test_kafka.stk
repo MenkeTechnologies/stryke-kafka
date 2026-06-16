@@ -180,6 +180,17 @@ assert_eq $rep->{assignment}[9]{partition}, 9, "replica_assignment: partition id
 assert_dies fn { Kafka::replica_assignment(3, 4, [0, 1, 2]) }, "replica_assignment: rejects RF larger than broker count"
 assert_dies fn { Kafka::replica_assignment(0, 1, [0]) },       "replica_assignment: rejects zero partitions"
 
+# assignment_by_broker: invert a partition→broker assignment to a per-broker view.
+val $by = Kafka::assignment_by_broker([ +{ partition => 0, replicas => [0, 1] }, +{ partition => 1, replicas => [1, 2] }, +{ partition => 2, replicas => [2, 0] } ])
+assert_eq scalar(@{ $by->{brokers} }), 3,                       "assignment_by_broker: three brokers"
+assert_eq $by->{brokers}[0]{broker}, 0,                         "assignment_by_broker: sorted by broker id"
+assert_eq join(",", @{ $by->{brokers}[0]{leader} }), "0",       "assignment_by_broker: broker 0 leads partition 0"
+assert_eq join(",", @{ $by->{brokers}[0]{replicas} }), "0,2",   "assignment_by_broker: broker 0 replicates partitions 0 and 2"
+assert_eq $by->{brokers}[0]{leader_count}, 1,                   "assignment_by_broker: leader count"
+# Round-trips replica_assignment.
+val $rt = Kafka::assignment_by_broker(Kafka::replica_assignment(10, 3, [0, 1, 2, 3, 4])->{assignment})
+assert_eq scalar(@{ $rt->{brokers} }), 5,                       "assignment_by_broker: all 5 brokers host partitions"
+assert_dies fn { Kafka::assignment_by_broker("nope") }, "assignment_by_broker: rejects a non-array assignment"
 # assignment_diff: what moves between two assignments (rebalance planning).
 val $ad = Kafka::assignment_diff({ c0 => [0, 1, 2, 3], c1 => [4, 5, 6] }, { c0 => [0, 1, 2], c1 => [4, 5], c2 => [3, 6] })
 assert_eq join(",", @{ $ad->{revoked}{c0} }),  "3", "assignment_diff: c0 gives up partition 3"

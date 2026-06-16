@@ -1572,6 +1572,59 @@ fn op_replica_assignment(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Invert a partition→broker `assignment` into a per-broker view — what each
+/// broker hosts and leads. The inverse of `replica_assignment`: for every
+/// `{partition, replicas: [broker…]}` entry, each broker in `replicas` gains the
+/// partition as a `replica`, and the broker in the first replica position (the
+/// preferred leader) also gains it as a `leader`. Useful for checking how evenly
+/// an assignment spreads leadership and load across the cluster. opts:
+/// `assignment` (the array `replica_assignment` returns). Returns `{brokers:
+/// [{broker, leader, replicas, leader_count, replica_count}]}` sorted by broker
+/// id, partitions sorted within each. Pure.
+fn op_assignment_by_broker(opts: Value) -> Result<Value> {
+    let assignment = opts
+        .get("assignment")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing assignment (array of {{partition, replicas}})"))?;
+    let mut brokers: std::collections::BTreeMap<i64, (Vec<i64>, Vec<i64>)> =
+        std::collections::BTreeMap::new();
+    for entry in assignment {
+        let partition = entry
+            .get("partition")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("assignment entry missing an integer `partition`"))?;
+        let replicas = entry
+            .get("replicas")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("assignment entry missing a `replicas` array"))?;
+        for (idx, r) in replicas.iter().enumerate() {
+            let bid = r
+                .as_i64()
+                .ok_or_else(|| anyhow!("replica broker ids must be integers"))?;
+            let e = brokers.entry(bid).or_default();
+            e.1.push(partition);
+            if idx == 0 {
+                e.0.push(partition);
+            }
+        }
+    }
+    let brokers_out: Vec<Value> = brokers
+        .into_iter()
+        .map(|(bid, (mut leaders, mut reps))| {
+            leaders.sort_unstable();
+            reps.sort_unstable();
+            json!({
+                "broker": bid,
+                "leader": leaders,
+                "replicas": reps,
+                "leader_count": leaders.len(),
+                "replica_count": reps.len(),
+            })
+        })
+        .collect();
+    Ok(json!({ "brokers": brokers_out }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1754,6 +1807,11 @@ pub extern "C" fn kafka__replica_assignment(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn kafka__assignment_diff(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_assignment_diff(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__assignment_by_broker(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_assignment_by_broker(opts) })
 }
 
 #[no_mangle]
@@ -2846,6 +2904,52 @@ mod tests {
         )
         .is_err());
         assert!(op_replica_assignment(json!({"partitions": 3, "replication_factor": 1})).is_err());
+    }
+
+    #[test]
+    fn assignment_by_broker_inverts_replica_assignment() {
+        // 3 brokers, 3 partitions, RF 2 — a hand-built balanced assignment.
+        let v = op_assignment_by_broker(json!({
+            "assignment": [
+                {"partition": 0, "replicas": [0, 1]},
+                {"partition": 1, "replicas": [1, 2]},
+                {"partition": 2, "replicas": [2, 0]},
+            ]
+        }))
+        .unwrap();
+        let brokers = v["brokers"].as_array().unwrap();
+        assert_eq!(brokers.len(), 3, "three brokers appear");
+        // Sorted by broker id; broker 0 leads p0, replicates p0 and p2.
+        assert_eq!(brokers[0]["broker"], json!(0));
+        assert_eq!(brokers[0]["leader"], json!([0]));
+        assert_eq!(brokers[0]["replicas"], json!([0, 2]));
+        assert_eq!(brokers[0]["leader_count"], json!(1));
+        assert_eq!(brokers[0]["replica_count"], json!(2));
+        // Every broker leads exactly one partition (balanced).
+        for b in brokers {
+            assert_eq!(b["leader_count"], json!(1));
+            assert_eq!(b["replica_count"], json!(2));
+        }
+        // Round-trips replica_assignment: total replica slots = partitions * RF.
+        let ra = op_replica_assignment(json!({
+            "partitions": 10, "replication_factor": 3, "brokers": [0, 1, 2, 3, 4]
+        }))
+        .unwrap();
+        let by = op_assignment_by_broker(json!({ "assignment": ra["assignment"] })).unwrap();
+        let total_replicas: u64 = by["brokers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["replica_count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            total_replicas, 30,
+            "10 partitions * RF 3 = 30 replica placements"
+        );
+        // Errors: a non-array assignment, a malformed entry, missing arg.
+        assert!(op_assignment_by_broker(json!({"assignment": "nope"})).is_err());
+        assert!(op_assignment_by_broker(json!({"assignment": [{"partition": 0}]})).is_err());
+        assert!(op_assignment_by_broker(json!({})).is_err());
     }
 
     #[test]
