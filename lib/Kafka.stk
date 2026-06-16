@@ -326,6 +326,17 @@ fn Kafka::sticky_assignment ($partitions, $consumers, $previous = undef) {
         kafka__sticky_assignment(to_json({ partitions => $partitions, consumers => $consumers, previous => $previous })))
 }
 
+## Diff two partition assignments ($previous and $current, each a hashref
+## { consumer => [partition…] }) to plan a rebalance: what each member loses and
+## gains. For the cooperative protocol, "revoked" is exactly the set to give up
+## before the new assignment applies. Returns a hashref { revoked => { member =>
+## [partition…] }, assigned => { member => [partition…] }, moved => count } —
+## "moved" counts partitions whose owner changed (appear/disappear counts too).
+fn Kafka::assignment_diff ($previous, $current) {
+    Kafka::_decode("assignment_diff",
+        kafka__assignment_diff(to_json({ previous => $previous, current => $current })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {

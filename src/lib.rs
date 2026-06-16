@@ -1407,6 +1407,74 @@ fn op_sticky_assignment(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Diff two consumer-group partition assignments — what each member gains and
+/// loses between `previous` and `current` (each `{consumer: [partitions]}`) — to
+/// plan a rebalance. For the cooperative protocol, `revoked` is exactly the set
+/// that must be given up before the new assignment is applied. Returns `revoked`
+/// and `assigned` (`{consumer: [partitions]}`, only members with a change), plus
+/// `moved` — the number of partitions whose owning consumer differs (a partition
+/// that newly appears or disappears counts as moved). Pure.
+fn op_assignment_diff(opts: Value) -> Result<Value> {
+    let as_owners = |key: &str| -> Result<std::collections::BTreeMap<u64, String>> {
+        let map = opts
+            .get(key)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("missing {key} (an object of consumer -> [partitions])"))?;
+        let mut owners = std::collections::BTreeMap::new();
+        for (consumer, parts) in map {
+            let arr = parts
+                .as_array()
+                .ok_or_else(|| anyhow!("`{consumer}` must map to an array of partitions"))?;
+            for p in arr {
+                let p = p
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("partition must be a non-negative integer"))?;
+                owners.insert(p, consumer.clone());
+            }
+        }
+        Ok(owners)
+    };
+    let prev = as_owners("previous")?;
+    let curr = as_owners("current").or_else(|_| as_owners("assignment"))?;
+
+    let mut revoked: std::collections::BTreeMap<String, Vec<u64>> =
+        std::collections::BTreeMap::new();
+    let mut assigned: std::collections::BTreeMap<String, Vec<u64>> =
+        std::collections::BTreeMap::new();
+    let mut moved = 0u64;
+    // A partition present before keeps moving if its owner changed or it vanished.
+    for (&p, owner) in &prev {
+        match curr.get(&p) {
+            Some(new_owner) if new_owner == owner => {}
+            Some(new_owner) => {
+                revoked.entry(owner.clone()).or_default().push(p);
+                assigned.entry(new_owner.clone()).or_default().push(p);
+                moved += 1;
+            }
+            None => {
+                revoked.entry(owner.clone()).or_default().push(p);
+                moved += 1;
+            }
+        }
+    }
+    // Partitions that are newly present (no prior owner) are freshly assigned.
+    for (&p, new_owner) in &curr {
+        if !prev.contains_key(&p) {
+            assigned.entry(new_owner.clone()).or_default().push(p);
+            moved += 1;
+        }
+    }
+    let to_obj = |m: std::collections::BTreeMap<String, Vec<u64>>| -> Value {
+        let mut out = serde_json::Map::new();
+        for (k, mut v) in m {
+            v.sort_unstable();
+            out.insert(k, json!(v));
+        }
+        Value::Object(out)
+    };
+    Ok(json!({ "revoked": to_obj(revoked), "assigned": to_obj(assigned), "moved": moved }))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1602,6 +1670,11 @@ pub extern "C" fn kafka__roundrobin_assignment(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn kafka__sticky_assignment(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_sticky_assignment(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__assignment_diff(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_assignment_diff(opts) })
 }
 
 #[no_mangle]
@@ -2644,6 +2717,43 @@ mod tests {
         }
         assert!(op_sticky_assignment(json!({"consumers": ["a"]})).is_err());
         assert!(op_sticky_assignment(json!({"partitions": 4, "consumers": []})).is_err());
+    }
+
+    #[test]
+    fn assignment_diff_reports_revocations_and_additions() {
+        // A consumer joins: c0/c1 each give up one partition to the new c2.
+        let v = op_assignment_diff(json!({
+            "previous": {"c0": [0, 1, 2, 3], "c1": [4, 5, 6]},
+            "current":  {"c0": [0, 1, 2], "c1": [4, 5], "c2": [3, 6]},
+        }))
+        .unwrap();
+        assert_eq!(v["revoked"], json!({"c0": [3], "c1": [6]}));
+        assert_eq!(v["assigned"], json!({"c2": [3, 6]}));
+        assert_eq!(v["moved"], json!(2), "two partitions changed owner");
+        // No change → empty diff, moved 0.
+        let same = op_assignment_diff(json!({
+            "previous": {"c0": [0, 1], "c1": [2]},
+            "current":  {"c0": [0, 1], "c1": [2]},
+        }))
+        .unwrap();
+        assert_eq!(same["revoked"], json!({}));
+        assert_eq!(same["assigned"], json!({}));
+        assert_eq!(same["moved"], json!(0));
+        // A partition that disappears is revoked; one that appears is assigned.
+        let grow = op_assignment_diff(json!({
+            "previous": {"c0": [0, 1]},
+            "current":  {"c0": [0], "c1": [2]},
+        }))
+        .unwrap();
+        assert_eq!(grow["revoked"], json!({"c0": [1]}));
+        assert_eq!(grow["assigned"], json!({"c1": [2]}));
+        assert_eq!(grow["moved"], json!(2));
+        // `assignment` is an alias for `current`; missing inputs error.
+        assert!(
+            op_assignment_diff(json!({"previous": {"c0": [0]}, "assignment": {"c0": [0]}})).is_ok()
+        );
+        assert!(op_assignment_diff(json!({"previous": {"c0": [0]}})).is_err());
+        assert!(op_assignment_diff(json!({})).is_err());
     }
 
     #[test]

@@ -171,6 +171,15 @@ val $sj = Kafka::sticky_assignment(7, ["c0", "c1", "c2"], { c0 => [0, 1, 2, 3], 
 assert_eq join(",", @{ $sj->{assignment}{c2} }), "3,6", "sticky_assignment: new consumer gets the shed partitions"
 assert_dies fn { Kafka::sticky_assignment(0, ["a"]) }, "sticky_assignment: rejects zero partitions"
 
+# assignment_diff: what moves between two assignments (rebalance planning).
+val $ad = Kafka::assignment_diff({ c0 => [0, 1, 2, 3], c1 => [4, 5, 6] }, { c0 => [0, 1, 2], c1 => [4, 5], c2 => [3, 6] })
+assert_eq join(",", @{ $ad->{revoked}{c0} }),  "3", "assignment_diff: c0 gives up partition 3"
+assert_eq join(",", @{ $ad->{revoked}{c1} }),  "6", "assignment_diff: c1 gives up partition 6"
+assert_eq join(",", @{ $ad->{assigned}{c2} }), "3,6", "assignment_diff: new consumer c2 gains the shed partitions"
+assert_eq $ad->{moved}, 2, "assignment_diff: two partitions changed owner"
+val $noop = Kafka::assignment_diff({ c0 => [0, 1] }, { c0 => [0, 1] })
+assert_eq $noop->{moved}, 0, "assignment_diff: identical assignments move nothing"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"
