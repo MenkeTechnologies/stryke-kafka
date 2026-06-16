@@ -258,6 +258,16 @@ fn Kafka::group_coordinator_partition ($group, $partitions = 50) {
         kafka__group_coordinator_partition(to_json({ group => $group, partitions => $partitions })))
 }
 
+## Predict a consumer group's partition assignment under Kafka's default
+## RangeAssignor for one topic: members are sorted, then each gets a contiguous
+## block of $partitions/N (+1 for the first $partitions%N members). @consumers
+## is a list of member ids. Returns { assignment => { member => [partition…] },
+## partitions, consumers }.
+fn Kafka::range_assignment ($partitions, @consumers) {
+    Kafka::_decode("range_assignment",
+        kafka__range_assignment(to_json({ partitions => $partitions, consumers => \@consumers })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {

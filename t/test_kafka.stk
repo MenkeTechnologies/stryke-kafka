@@ -110,6 +110,15 @@ assert_eq Kafka::group_coordinator_partition("my-consumer-group")->{partition}, 
 assert_lt Kafka::group_coordinator_partition("g", 16)->{partition}, 16, "group_coordinator_partition: honors explicit partition count"
 assert_dies fn { Kafka::group_coordinator_partition("g", 0) }, "group_coordinator_partition: rejects zero partitions"
 
+# range_assignment: Kafka default RangeAssignor for one topic.
+val $ra = Kafka::range_assignment(7, "c0", "c1", "c2")
+assert_eq join(",", @{ $ra->{assignment}{c0} }), "0,1,2", "range_assignment: first member absorbs the remainder"
+assert_eq join(",", @{ $ra->{assignment}{c1} }), "3,4",   "range_assignment: second member block"
+assert_eq join(",", @{ $ra->{assignment}{c2} }), "5,6",   "range_assignment: third member block"
+val $sp = Kafka::range_assignment(2, "x", "y", "z")
+assert_eq scalar(@{ $sp->{assignment}{z} }), 0, "range_assignment: surplus consumer gets nothing"
+assert_dies fn { Kafka::range_assignment(0, "a") }, "range_assignment: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"

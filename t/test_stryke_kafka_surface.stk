@@ -46,6 +46,7 @@ assert_ok exists &Kafka::build_brokers, "Kafka::build_brokers exists"
 assert_ok exists &Kafka::partition_for_key, "Kafka::partition_for_key exists"
 assert_ok exists &Kafka::partition_for_key_crc32, "Kafka::partition_for_key_crc32 exists"
 assert_ok exists &Kafka::group_coordinator_partition, "Kafka::group_coordinator_partition exists"
+assert_ok exists &Kafka::range_assignment, "Kafka::range_assignment exists"
 assert_ok exists &Kafka::format_offset, "Kafka::format_offset exists"
 
 test_run

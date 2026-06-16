@@ -1095,6 +1095,57 @@ fn op_group_coordinator_partition(opts: Value) -> Result<Value> {
     Ok(json!({"group": group, "partition": partition, "hash": hash, "partitions": partitions}))
 }
 
+/// Predict a consumer group's partition assignment under Kafka's default
+/// `RangeAssignor` (the `partition.assignment.strategy` default) for a single
+/// topic. Faithful port: members are sorted, then with `base = partitions /
+/// members` and `extra = partitions % members`, member `i` gets `base` (+1 if
+/// `i < extra`) contiguous partitions — so earlier members absorb the remainder.
+/// opts: `partitions` (count > 0), `consumers` (array of member-id strings).
+/// Returns `{assignment: {member: [partition…]}, partitions, consumers}`. Pure.
+fn op_range_assignment(opts: Value) -> Result<Value> {
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions (count)"))?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let members_raw = opts
+        .get("consumers")
+        .or_else(|| opts.get("members"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing consumers (array of member ids)"))?;
+    let mut members: Vec<String> = members_raw
+        .iter()
+        .map(|m| {
+            m.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("consumer id must be a string"))
+        })
+        .collect::<Result<_>>()?;
+    if members.is_empty() {
+        return Err(anyhow!("consumers is empty"));
+    }
+    // RangeAssignor sorts member ids before slicing.
+    members.sort();
+    let n = members.len() as u64;
+    let base = partitions / n;
+    let extra = partitions % n;
+    let mut assignment = serde_json::Map::new();
+    for (i, member) in members.iter().enumerate() {
+        let i = i as u64;
+        let start = base * i + i.min(extra);
+        let length = base + if i < extra { 1 } else { 0 };
+        let parts: Vec<u64> = (start..start + length).collect();
+        assignment.insert(member.clone(), json!(parts));
+    }
+    Ok(json!({
+        "assignment": assignment,
+        "partitions": partitions,
+        "consumers": members,
+    }))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1253,6 +1304,11 @@ pub extern "C" fn kafka__group_coordinator_partition(args: *const c_char) -> *co
         args,
         |opts| async move { op_group_coordinator_partition(opts) },
     )
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__range_assignment(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_range_assignment(opts) })
 }
 
 #[no_mangle]
@@ -2031,6 +2087,38 @@ mod tests {
         }
         assert!(op_group_coordinator_partition(json!({"group": "g", "partitions": 0})).is_err());
         assert!(op_group_coordinator_partition(json!({})).is_err());
+    }
+
+    #[test]
+    fn range_assignment_matches_kafka_range_assignor() {
+        // 7 partitions, 3 consumers: the first absorbs the remainder → 3/2/2.
+        let v =
+            op_range_assignment(json!({"partitions": 7, "consumers": ["c0", "c1", "c2"]})).unwrap();
+        let a = &v["assignment"];
+        assert_eq!(a["c0"], json!([0, 1, 2]));
+        assert_eq!(a["c1"], json!([3, 4]));
+        assert_eq!(a["c2"], json!([5, 6]));
+        // Even split: 6 partitions, 3 consumers → 2 each, contiguous.
+        let even =
+            op_range_assignment(json!({"partitions": 6, "consumers": ["a", "b", "c"]})).unwrap();
+        assert_eq!(even["assignment"]["a"], json!([0, 1]));
+        assert_eq!(even["assignment"]["c"], json!([4, 5]));
+        // More consumers than partitions: extras get nothing.
+        let sparse =
+            op_range_assignment(json!({"partitions": 2, "consumers": ["x", "y", "z"]})).unwrap();
+        assert_eq!(sparse["assignment"]["x"], json!([0]));
+        assert_eq!(sparse["assignment"]["y"], json!([1]));
+        assert_eq!(sparse["assignment"]["z"], json!([]));
+        // Member ids are sorted before slicing, regardless of input order.
+        let unsorted =
+            op_range_assignment(json!({"partitions": 4, "consumers": ["c2", "c0", "c1"]})).unwrap();
+        assert_eq!(unsorted["assignment"]["c0"], json!([0, 1]));
+        assert_eq!(unsorted["assignment"]["c2"], json!([3]));
+        // Errors.
+        assert!(op_range_assignment(json!({"consumers": ["a"]})).is_err());
+        assert!(op_range_assignment(json!({"partitions": 4})).is_err());
+        assert!(op_range_assignment(json!({"partitions": 0, "consumers": ["a"]})).is_err());
+        assert!(op_range_assignment(json!({"partitions": 4, "consumers": []})).is_err());
     }
 
     #[test]
