@@ -257,6 +257,15 @@ fn Kafka::partition_for_key_crc32 ($key, $partitions) {
         kafka__partition_for_key_crc32(to_json({ key => $key, partitions => $partitions })))
 }
 
+## Predict the partition under librdkafka's `fnv1a` partitioner —
+## fnv1a($key) % $partitions — the third option alongside consistent (crc32) and
+## the JVM murmur2. The 32-bit FNV-1a hash is unsigned, so no toPositive masking.
+## Returns a hashref { partition, fnv1a }.
+fn Kafka::partition_for_key_fnv1a ($key, $partitions) {
+    Kafka::_decode("partition_for_key_fnv1a",
+        kafka__partition_for_key_fnv1a(to_json({ key => $key, partitions => $partitions })))
+}
+
 ## Which __consumer_offsets partition (and thus coordinator broker) holds a
 ## consumer $group's offsets: Utils.abs(groupId.hashCode()) % $partitions, where
 ## Utils.abs is the & 0x7fffffff bitmask and $partitions defaults to 50. Returns

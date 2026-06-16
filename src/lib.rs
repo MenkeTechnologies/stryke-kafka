@@ -1080,6 +1080,18 @@ fn crc32_ieee(data: &[u8]) -> u32 {
     !crc
 }
 
+/// 32-bit FNV-1a hash — the basis of librdkafka's `fnv1a` partitioner. Offset
+/// basis `0x811c9dc5`, prime `0x01000193`; for each byte: `h ^= byte; h *= prime`
+/// (wrapping at u32).
+fn fnv1a(data: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for &byte in data {
+        h ^= byte as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 /// Predict the partition for a keyed record under librdkafka's `consistent`
 /// partitioner — `crc32(key) % partitions` — the default for every non-JVM
 /// Kafka client (C/C++, Python, Go, Rust). Distinct from `partition_for_key`,
@@ -1101,6 +1113,29 @@ fn op_partition_for_key_crc32(opts: Value) -> Result<Value> {
     let crc = crc32_ieee(key.as_bytes());
     let partition = crc as u64 % partitions;
     Ok(json!({"partition": partition, "crc32": crc}))
+}
+
+/// Predict the partition for a keyed record under librdkafka's `fnv1a`
+/// partitioner — `fnv1a(key) % partitions`, the third option alongside
+/// `consistent` (crc32) and the JVM `murmur2`. The 32-bit FNV-1a hash is already
+/// unsigned, so there is no `Utils.toPositive` masking step (unlike murmur2).
+/// opts: `key` (string), `partitions` (count > 0). Returns `{partition, fnv1a}`.
+/// Pure.
+fn op_partition_for_key_fnv1a(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing key"))?;
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions"))?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let hash = fnv1a(key.as_bytes());
+    let partition = hash as u64 % partitions;
+    Ok(json!({"partition": partition, "fnv1a": hash}))
 }
 
 /// Java `String.hashCode()` — `s[0]*31^(n-1) + … + s[n-1]` over UTF-16 code
@@ -1406,6 +1441,11 @@ pub extern "C" fn kafka__partition_for_key(args: *const c_char) -> *const c_char
 #[no_mangle]
 pub extern "C" fn kafka__partition_for_key_crc32(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_partition_for_key_crc32(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__partition_for_key_fnv1a(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_partition_for_key_fnv1a(opts) })
 }
 
 #[no_mangle]
@@ -2194,6 +2234,29 @@ mod tests {
             assert!(r["partition"].as_u64().unwrap() < p);
         }
         assert!(op_partition_for_key_crc32(json!({"key": "x", "partitions": 0})).is_err());
+    }
+
+    #[test]
+    fn fnv1a_matches_canonical_test_vectors() {
+        // Canonical 32-bit FNV-1a values from the FNV reference.
+        assert_eq!(fnv1a(b""), 0x811c_9dc5);
+        assert_eq!(fnv1a(b"a"), 0xe40c_292c);
+        assert_eq!(fnv1a(b"foobar"), 0xbf9c_f968);
+    }
+
+    #[test]
+    fn partition_for_key_fnv1a_uses_the_fnv1a_partitioner() {
+        // librdkafka `fnv1a`: fnv1a(key) % partitions, unsigned. "foobar" → 0xbf9cf968.
+        let v = op_partition_for_key_fnv1a(json!({"key": "foobar", "partitions": 10})).unwrap();
+        assert_eq!(v["fnv1a"], json!(0xbf9c_f968u32));
+        assert_eq!(v["partition"], json!(0xbf9c_f968u64 % 10));
+        // Deterministic and always in [0, partitions).
+        for p in 1u64..=8 {
+            let r = op_partition_for_key_fnv1a(json!({"key": "user-42", "partitions": p})).unwrap();
+            assert!(r["partition"].as_u64().unwrap() < p);
+        }
+        assert!(op_partition_for_key_fnv1a(json!({"key": "x", "partitions": 0})).is_err());
+        assert!(op_partition_for_key_fnv1a(json!({"key": "x"})).is_err());
     }
 
     #[test]
