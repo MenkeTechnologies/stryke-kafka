@@ -171,6 +171,15 @@ val $sj = Kafka::sticky_assignment(7, ["c0", "c1", "c2"], { c0 => [0, 1, 2, 3], 
 assert_eq join(",", @{ $sj->{assignment}{c2} }), "3,6", "sticky_assignment: new consumer gets the shed partitions"
 assert_dies fn { Kafka::sticky_assignment(0, ["a"]) }, "sticky_assignment: rejects zero partitions"
 
+# replica_assignment: Kafka's default rack-unaware partition→broker placement.
+val $rep = Kafka::replica_assignment(10, 3, [0, 1, 2, 3, 4])
+assert_eq join(",", @{ $rep->{assignment}[0]{replicas} }), "0,1,2", "replica_assignment: partition 0 → brokers 0,1,2"
+assert_eq join(",", @{ $rep->{assignment}[3]{replicas} }), "3,4,0", "replica_assignment: leader wraps around the broker list"
+assert_eq join(",", @{ $rep->{assignment}[5]{replicas} }), "0,2,3", "replica_assignment: follower shift bumps after nBrokers partitions"
+assert_eq $rep->{assignment}[9]{partition}, 9, "replica_assignment: partition ids reported"
+assert_dies fn { Kafka::replica_assignment(3, 4, [0, 1, 2]) }, "replica_assignment: rejects RF larger than broker count"
+assert_dies fn { Kafka::replica_assignment(0, 1, [0]) },       "replica_assignment: rejects zero partitions"
+
 # assignment_diff: what moves between two assignments (rebalance planning).
 val $ad = Kafka::assignment_diff({ c0 => [0, 1, 2, 3], c1 => [4, 5, 6] }, { c0 => [0, 1, 2], c1 => [4, 5], c2 => [3, 6] })
 assert_eq join(",", @{ $ad->{revoked}{c0} }),  "3", "assignment_diff: c0 gives up partition 3"

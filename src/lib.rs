@@ -1498,6 +1498,80 @@ fn op_format_offset(opts: Value) -> Result<Value> {
     Err(anyhow!("format_offset requires `offset` or `name`"))
 }
 
+/// Kafka's default rack-unaware replica assignment — the partition-to-broker
+/// placement `kafka-topics --create` computes (AdminUtils
+/// `assignReplicasToBrokersRackUnaware`). Distinct from the consumer assignors
+/// (`range`/`roundrobin`/`sticky`), which place partitions on *consumers*; this
+/// places partition *replicas* on *brokers*. The first replica of partition p
+/// goes to broker `(p + start_index) % nBrokers`; each further replica is shifted
+/// by `1 + (next_replica_shift + j) % (nBrokers - 1)`, and `next_replica_shift`
+/// bumps every `nBrokers` partitions — spreading leaders and followers evenly.
+/// `start_index`/`start_partition` default to 0 (the deterministic seeding;
+/// Kafka randomizes them at runtime). opts: `partitions`, `replication_factor`,
+/// `brokers` (array of ids), optional `start_index`, `start_partition`. Returns
+/// `{assignment: [{partition, replicas}], partitions, replication_factor}`. Pure.
+fn op_replica_assignment(opts: Value) -> Result<Value> {
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions"))? as usize;
+    let rf = opts
+        .get("replication_factor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing replication_factor"))? as usize;
+    let brokers: Vec<i64> = opts
+        .get("brokers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing brokers (array of broker ids)"))?
+        .iter()
+        .map(|v| {
+            v.as_i64()
+                .ok_or_else(|| anyhow!("broker ids must be integers"))
+        })
+        .collect::<Result<_>>()?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be >= 1"));
+    }
+    if rf == 0 {
+        return Err(anyhow!("replication_factor must be >= 1"));
+    }
+    if brokers.is_empty() {
+        return Err(anyhow!("brokers must not be empty"));
+    }
+    if rf > brokers.len() {
+        return Err(anyhow!(
+            "replication_factor {rf} larger than available brokers: {}",
+            brokers.len()
+        ));
+    }
+    let n = brokers.len();
+    let start_index = opts.get("start_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let start_partition = opts
+        .get("start_partition")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut next_replica_shift = start_index;
+    let mut assignment: Vec<Value> = Vec::with_capacity(partitions);
+    for i in 0..partitions {
+        let current_partition_id = start_partition + i;
+        if current_partition_id > 0 && current_partition_id.is_multiple_of(n) {
+            next_replica_shift += 1;
+        }
+        let first_replica_index = (current_partition_id + start_index) % n;
+        let mut replicas: Vec<i64> = vec![brokers[first_replica_index]];
+        for j in 0..rf - 1 {
+            let shift = 1 + (next_replica_shift + j) % (n - 1);
+            replicas.push(brokers[(first_replica_index + shift) % n]);
+        }
+        assignment.push(json!({"partition": current_partition_id, "replicas": replicas}));
+    }
+    Ok(json!({
+        "assignment": assignment,
+        "partitions": partitions,
+        "replication_factor": rf,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1670,6 +1744,11 @@ pub extern "C" fn kafka__roundrobin_assignment(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn kafka__sticky_assignment(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_sticky_assignment(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__replica_assignment(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_replica_assignment(opts) })
 }
 
 #[no_mangle]
@@ -2717,6 +2796,56 @@ mod tests {
         }
         assert!(op_sticky_assignment(json!({"consumers": ["a"]})).is_err());
         assert!(op_sticky_assignment(json!({"partitions": 4, "consumers": []})).is_err());
+    }
+
+    #[test]
+    fn replica_assignment_matches_kafka_rack_unaware_algorithm() {
+        // The canonical Kafka example: 5 brokers, 10 partitions, RF 3, seeded at 0.
+        let v = op_replica_assignment(json!({
+            "partitions": 10, "replication_factor": 3, "brokers": [0, 1, 2, 3, 4]
+        }))
+        .unwrap();
+        let a = v["assignment"].as_array().unwrap();
+        let replicas = |p: usize| a[p]["replicas"].clone();
+        assert_eq!(replicas(0), json!([0, 1, 2]));
+        assert_eq!(replicas(1), json!([1, 2, 3]));
+        assert_eq!(replicas(2), json!([2, 3, 4]));
+        assert_eq!(replicas(3), json!([3, 4, 0]));
+        assert_eq!(replicas(4), json!([4, 0, 1]));
+        // After nBrokers partitions the follower shift bumps.
+        assert_eq!(replicas(5), json!([0, 2, 3]));
+        assert_eq!(replicas(6), json!([1, 3, 4]));
+        assert_eq!(replicas(7), json!([2, 4, 0]));
+        assert_eq!(replicas(8), json!([3, 0, 1]));
+        assert_eq!(replicas(9), json!([4, 1, 2]));
+        // Every partition has RF distinct brokers.
+        for p in a {
+            let r = p["replicas"].as_array().unwrap();
+            assert_eq!(r.len(), 3);
+            let set: std::collections::HashSet<_> = r.iter().map(|x| x.as_i64()).collect();
+            assert_eq!(set.len(), 3, "replicas are distinct brokers");
+        }
+        // RF 1, arbitrary broker ids, partition ids reported.
+        let rf1 = op_replica_assignment(json!({
+            "partitions": 3, "replication_factor": 1, "brokers": [101, 202]
+        }))
+        .unwrap();
+        assert_eq!(rf1["assignment"][0]["replicas"], json!([101]));
+        assert_eq!(rf1["assignment"][2]["partition"], json!(2));
+        // Errors: RF over broker count, zero partitions, empty brokers, missing args.
+        assert!(op_replica_assignment(
+            json!({"partitions": 3, "replication_factor": 4, "brokers": [0, 1, 2]})
+        )
+        .is_err());
+        assert!(op_replica_assignment(
+            json!({"partitions": 0, "replication_factor": 1, "brokers": [0]})
+        )
+        .is_err());
+        assert!(op_replica_assignment(
+            json!({"partitions": 3, "replication_factor": 1, "brokers": []})
+        )
+        .is_err());
+        assert!(op_replica_assignment(json!({"partitions": 3, "replication_factor": 1})).is_err());
     }
 
     #[test]

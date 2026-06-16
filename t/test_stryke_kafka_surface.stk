@@ -53,6 +53,7 @@ assert_ok exists &Kafka::transaction_coordinator_partition, "Kafka::transaction_
 assert_ok exists &Kafka::range_assignment, "Kafka::range_assignment exists"
 assert_ok exists &Kafka::roundrobin_assignment, "Kafka::roundrobin_assignment exists"
 assert_ok exists &Kafka::sticky_assignment, "Kafka::sticky_assignment exists"
+assert_ok exists &Kafka::replica_assignment, "Kafka::replica_assignment exists"
 assert_ok exists &Kafka::assignment_diff, "Kafka::assignment_diff exists"
 assert_ok exists &Kafka::format_offset, "Kafka::format_offset exists"
 

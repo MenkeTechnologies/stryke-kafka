@@ -326,6 +326,24 @@ fn Kafka::sticky_assignment ($partitions, $consumers, $previous = undef) {
         kafka__sticky_assignment(to_json({ partitions => $partitions, consumers => $consumers, previous => $previous })))
 }
 
+## Kafka's default rack-unaware replica assignment — the partition→broker
+## placement kafka-topics --create computes. Distinct from the consumer assignors
+## (range/roundrobin/sticky), which place partitions on consumers; this places
+## partition replicas on brokers, spreading leaders and followers evenly.
+## $brokers is an arrayref of broker ids; %opts may set start_index /
+## start_partition (both default 0 — the deterministic seeding Kafka randomizes
+## at runtime). Returns a hashref
+## { assignment => [ { partition, replicas => [broker…] } ], partitions, replication_factor }.
+fn Kafka::replica_assignment ($partitions, $replication_factor, $brokers, %opts) {
+    Kafka::_decode("replica_assignment", kafka__replica_assignment(to_json({
+        partitions         => $partitions,
+        replication_factor => $replication_factor,
+        brokers            => $brokers,
+        start_index        => $opts{start_index},
+        start_partition    => $opts{start_partition},
+    })))
+}
+
 ## Diff two partition assignments ($previous and $current, each a hashref
 ## { consumer => [partition…] }) to plan a rebalance: what each member loses and
 ## gains. For the cooperative protocol, "revoked" is exactly the set to give up
