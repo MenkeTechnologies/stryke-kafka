@@ -232,6 +232,14 @@ fn Kafka::build_brokers ($brokers) {
     Kafka::_decode("build_brokers", kafka__build_brokers(to_json({ brokers => $brokers })))->{bootstrap}
 }
 
+## Normalize a bootstrap.servers $brokers string: fill the default port (9092,
+## override via %opts default_port) on portless entries, dedupe, and re-emit a
+## canonical comma-joined string. Returns the normalized bootstrap string.
+fn Kafka::normalize_brokers ($brokers, %opts) {
+    Kafka::_decode("normalize_brokers",
+        kafka__normalize_brokers(to_json({ brokers => $brokers, default_port => $opts{default_port} })))->{bootstrap}
+}
+
 ## Predict the partition Kafka's default partitioner sends a keyed record to,
 ## client-side: toPositive(murmur2($key)) % $partitions. Returns a hashref
 ## { partition, hash }. Lets you compute partition assignment without a broker.

@@ -958,6 +958,46 @@ fn op_build_brokers(opts: Value) -> Result<Value> {
     Ok(json!({"bootstrap": parts.join(",")}))
 }
 
+/// Normalize a `bootstrap.servers` string: trim entries, fill the default broker
+/// port (`9092`, override with `default_port`) on any entry that omits one, drop
+/// duplicates (keeping the first occurrence), and re-emit a canonical
+/// comma-joined string. opts: `brokers` (or `bootstrap`) required, optional
+/// `default_port`. Returns `{bootstrap, brokers: [{host, port}], count}`. Pure.
+fn op_normalize_brokers(opts: Value) -> Result<Value> {
+    let s = opts
+        .get("brokers")
+        .or_else(|| opts.get("bootstrap"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing brokers"))?;
+    let default_port = opts
+        .get("default_port")
+        .and_then(Value::as_u64)
+        .unwrap_or(9092) as u32;
+    let mut seen = std::collections::HashSet::new();
+    let mut brokers = Vec::new();
+    let mut parts = Vec::new();
+    for hp in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+        let (host, port) = match hp.rsplit_once(':') {
+            Some((h, p)) => match p.parse::<u32>() {
+                Ok(port) => (h.to_string(), port),
+                // A `:` that isn't a port (e.g. a bare IPv6 literal) — keep the
+                // whole entry as the host and apply the default port.
+                Err(_) => (hp.to_string(), default_port),
+            },
+            None => (hp.to_string(), default_port),
+        };
+        let canonical = format!("{host}:{port}");
+        if seen.insert(canonical.clone()) {
+            brokers.push(json!({"host": host, "port": port}));
+            parts.push(canonical);
+        }
+    }
+    if parts.is_empty() {
+        return Err(anyhow!("no brokers in `{s}`"));
+    }
+    Ok(json!({"bootstrap": parts.join(","), "brokers": brokers, "count": parts.len()}))
+}
+
 /// Kafka's `Utils.murmur2` — the 32-bit MurmurHash2 variant (seed `0x9747b28c`)
 /// that the producer's default partitioner hashes record keys with. Faithful
 /// port: `i32` wrapping arithmetic and logical (`>>>`) shifts, matching the JVM.
@@ -1318,6 +1358,11 @@ pub extern "C" fn kafka__parse_brokers(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__build_brokers(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_build_brokers(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__normalize_brokers(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_normalize_brokers(opts) })
 }
 
 #[no_mangle]
@@ -2030,6 +2075,30 @@ mod tests {
         // Missing host and empty list error.
         assert!(op_build_brokers(json!({"brokers": [{"port": 9092}]})).is_err());
         assert!(op_build_brokers(json!({"brokers": []})).is_err());
+    }
+
+    #[test]
+    fn normalize_brokers_fills_default_port_and_dedupes() {
+        // Portless entries get :9092; whitespace trimmed; already-normal unchanged.
+        let v = op_normalize_brokers(json!({"brokers": "h1, h2:9093 ,h3"})).unwrap();
+        assert_eq!(v["bootstrap"], json!("h1:9092,h2:9093,h3:9092"));
+        assert_eq!(v["count"], json!(3));
+        assert_eq!(v["brokers"][0], json!({"host": "h1", "port": 9092}));
+        assert_eq!(v["brokers"][1], json!({"host": "h2", "port": 9093}));
+        // Duplicates (after port-filling) collapse, first occurrence kept.
+        assert_eq!(
+            op_normalize_brokers(json!({"brokers": "h1:9092,h1,h2,h2:9092"})).unwrap()["bootstrap"],
+            json!("h1:9092,h2:9092")
+        );
+        // A custom default port is honored.
+        assert_eq!(
+            op_normalize_brokers(json!({"brokers": "h1,h2", "default_port": 19092})).unwrap()
+                ["bootstrap"],
+            json!("h1:19092,h2:19092")
+        );
+        // Empty / missing reject.
+        assert!(op_normalize_brokers(json!({"brokers": " , "})).is_err());
+        assert!(op_normalize_brokers(json!({})).is_err());
     }
 
     #[test]

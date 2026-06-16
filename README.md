@@ -264,6 +264,7 @@ Kafka::is_internal_topic($name) → 1 | ""                    # `__` prefix
 Kafka::topics_collide($a, $b)   → 1 | ""                    # metric-namespace collision: equal after `.`→`_` (my.topic vs my_topic)
 Kafka::parse_brokers($str)      → @{ {host, port} }          # bootstrap.servers list
 Kafka::build_brokers(\@brokers) → $str                      # {host,port} list → bootstrap.servers; inverse of parse_brokers
+Kafka::normalize_brokers($str, %opts) → $str                # fill default :9092 (opts default_port), trim, dedupe → canonical bootstrap.servers
 Kafka::partition_for_key($key, $partitions) → { partition, hash }   # JVM default partitioner: toPositive(murmur2(key)) % partitions
 Kafka::partition_for_key_crc32($key, $partitions) → { partition, crc32 }   # librdkafka `consistent` partitioner: crc32(key) % partitions (non-JVM clients)
 Kafka::group_coordinator_partition($group, $partitions=50) → { group, partition, hash, partitions }   # __consumer_offsets partition for a group: abs(groupId.hashCode()) % 50
@@ -289,7 +290,7 @@ admin/produce/consume surface (`kafka__pkg_version`, `kafka__ping`,
 `kafka__delete_topic`, …) plus broker-free helpers
 (`kafka__valid_topic_name`, `kafka__is_internal_topic`,
 `kafka__topics_collide`,
-`kafka__parse_brokers`, `kafka__build_brokers`, `kafka__partition_for_key`,
+`kafka__parse_brokers`, `kafka__build_brokers`, `kafka__normalize_brokers`, `kafka__partition_for_key`,
 `kafka__format_offset`). The authoritative list is
 `[ffi].exports` in `stryke.toml`.
 

@@ -81,6 +81,12 @@ assert_eq Kafka::build_brokers([ +{ host => "b1", port => 9092 }, +{ host => "b2
 assert_eq Kafka::build_brokers([ +{ host => "b3" } ]), "b3", "build_brokers: portless broker is host-only"
 assert_eq Kafka::build_brokers(\@brokers), "b1:9092,b2:9093,b3", "build_brokers: round-trips parse_brokers output"
 
+# normalize_brokers: fill default port, trim, dedupe.
+assert_eq Kafka::normalize_brokers("h1, h2:9093 ,h3"), "h1:9092,h2:9093,h3:9092", "normalize_brokers: fills :9092, trims"
+assert_eq Kafka::normalize_brokers("h1:9092,h1,h2"), "h1:9092,h2:9092", "normalize_brokers: dedupes after port-filling"
+assert_eq Kafka::normalize_brokers("h1,h2", default_port => 19092), "h1:19092,h2:19092", "normalize_brokers: custom default port"
+assert_dies fn { Kafka::normalize_brokers(" , ") }, "normalize_brokers: rejects an empty list"
+
 # partition_for_key: default-partitioner murmur2 hash, verified against Kafka.
 # toPositive(murmur2("foobar")) % 10 = 6; hash is the signed murmur2 value.
 val $pk = Kafka::partition_for_key("foobar", 10)
