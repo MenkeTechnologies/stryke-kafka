@@ -273,6 +273,7 @@ Kafka::group_coordinator_partition($group, $partitions=50) → { group, partitio
 Kafka::transaction_coordinator_partition($transactional_id, $partitions=50) → { transactional_id, partition, hash, partitions }   # __transaction_state partition: same formula over the transaction log
 Kafka::range_assignment($partitions, @consumers) → { assignment:{member:[partition…]}, partitions, consumers }   # default RangeAssignor: predict a rebalance's partition assignment
 Kafka::roundrobin_assignment($partitions, @consumers) → { assignment:{member:[partition…]}, partitions, consumers }   # RoundRobinAssignor: interleaved (partition p → member p%N)
+Kafka::sticky_assignment($partitions, \@consumers, \%previous?) → { assignment:{member:[partition…]}, partitions, consumers }   # StickyAssignor (KIP-54): balanced but preserves \%previous to minimize rebalance movement
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
 ```
 

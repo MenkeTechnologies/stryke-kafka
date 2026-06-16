@@ -158,6 +158,19 @@ val $rrs = Kafka::roundrobin_assignment(2, "x", "y", "z")
 assert_eq scalar(@{ $rrs->{assignment}{z} }), 0, "roundrobin_assignment: surplus consumer gets nothing"
 assert_dies fn { Kafka::roundrobin_assignment(0, "a") }, "roundrobin_assignment: rejects zero partitions"
 
+# sticky_assignment: StickyAssignor — balanced, movement-minimizing.
+val $sk = Kafka::sticky_assignment(7, ["c0", "c1", "c2"])
+assert_eq join(",", @{ $sk->{assignment}{c0} }), "0,1,2", "sticky_assignment: no-previous balanced fill (ceil to first id)"
+assert_eq join(",", @{ $sk->{assignment}{c2} }), "5,6",   "sticky_assignment: no-previous tail member"
+# A consumer leaves: survivors keep what they own; only the departed member's partitions move.
+val $sl = Kafka::sticky_assignment(7, ["c0", "c2"], { c0 => [0, 1, 2], c1 => [3, 4], c2 => [5, 6] })
+assert_eq join(",", @{ $sl->{assignment}{c0} }), "0,1,2,3", "sticky_assignment: survivor keeps its partitions and absorbs an orphan"
+assert_eq join(",", @{ $sl->{assignment}{c2} }), "4,5,6",   "sticky_assignment: second survivor absorbs the other orphan"
+# A consumer joins: incumbents shed only what balance requires.
+val $sj = Kafka::sticky_assignment(7, ["c0", "c1", "c2"], { c0 => [0, 1, 2, 3], c1 => [4, 5, 6] })
+assert_eq join(",", @{ $sj->{assignment}{c2} }), "3,6", "sticky_assignment: new consumer gets the shed partitions"
+assert_dies fn { Kafka::sticky_assignment(0, ["a"]) }, "sticky_assignment: rejects zero partitions"
+
 assert_eq Kafka::format_offset(-1)->{name}, "latest",     "format_offset: -1 → latest"
 assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 → earliest"
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"

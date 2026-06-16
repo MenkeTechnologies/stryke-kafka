@@ -313,6 +313,19 @@ fn Kafka::roundrobin_assignment ($partitions, @consumers) {
         kafka__roundrobin_assignment(to_json({ partitions => $partitions, consumers => \@consumers })))
 }
 
+## Predict a consumer group's partition assignment under Kafka's StickyAssignor
+## (KIP-54) for one topic: balanced like the others, but preserves as much of a
+## prior assignment as possible so a rebalance moves the fewest partitions. Unlike
+## the sibling assignors this takes $consumers as an ARRAYREF (so a third arg
+## fits): $previous is an optional hashref { member => [partition…] } of the
+## current assignment (entries for departed members and stale/duplicate
+## partitions are ignored). With no $previous it gives a deterministic balanced
+## fill. Returns { assignment => { member => [partition…] }, partitions, consumers }.
+fn Kafka::sticky_assignment ($partitions, $consumers, $previous = undef) {
+    Kafka::_decode("sticky_assignment",
+        kafka__sticky_assignment(to_json({ partitions => $partitions, consumers => $consumers, previous => $previous })))
+}
+
 ## Map a special offset sentinel to its name, or a name to its sentinel:
 ## -1 <-> "latest", -2 <-> "earliest". Pass a number or a string.
 fn Kafka::format_offset ($offset_or_name) {

@@ -1332,6 +1332,81 @@ fn op_roundrobin_assignment(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Kafka's StickyAssignor (KIP-54) for a single subscribed topic: produce a
+/// balanced assignment (every member within one partition of every other) that
+/// preserves as many partitions as possible from a `previous` assignment, so a
+/// rebalance moves the fewest partitions. opts: `partitions` (count),
+/// `consumers`/`members` (ids), and optional `previous` (`{member: [partitions]}`
+/// — entries for departed members and partitions ≥ `partitions` are ignored; a
+/// partition claimed by two current members goes to the lexicographically first).
+/// With no `previous` it degenerates to a deterministic balanced fill. Members
+/// keeping more partitions are entitled to the larger (ceil) share; any excess
+/// above a member's share is reassigned to members below theirs. Returns
+/// `{assignment, partitions, consumers}`. Pure. Companion of
+/// `range_assignment`/`roundrobin_assignment` — a distinct, movement-minimizing
+/// strategy.
+fn op_sticky_assignment(opts: Value) -> Result<Value> {
+    let (partitions, members) = parse_assignment_inputs(&opts)?;
+    let n = members.len() as u64;
+    // Retain each current member's still-valid previous partitions, deduped
+    // globally in sorted-member order so a contested partition has one owner.
+    let mut retained: HashMap<String, Vec<u64>> =
+        members.iter().map(|m| (m.clone(), Vec::new())).collect();
+    let mut claimed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    if let Some(prev) = opts.get("previous").and_then(Value::as_object) {
+        for m in &members {
+            if let Some(parts) = prev.get(m).and_then(Value::as_array) {
+                for p in parts.iter().filter_map(Value::as_u64) {
+                    if p < partitions && claimed.insert(p) {
+                        retained.get_mut(m).unwrap().push(p);
+                    }
+                }
+            }
+        }
+    }
+    let mut unassigned: Vec<u64> = (0..partitions).filter(|p| !claimed.contains(p)).collect();
+    // Capacity: `extra` members get ceil, the rest floor; the larger shares go
+    // to the members already holding the most, maximizing what they keep.
+    let floor = partitions / n;
+    let extra = (partitions % n) as usize;
+    let mut order: Vec<&String> = members.iter().collect();
+    order.sort_by(|a, b| retained[*b].len().cmp(&retained[*a].len()).then(a.cmp(b)));
+    let mut capacity: HashMap<String, usize> = HashMap::new();
+    for (idx, m) in order.iter().enumerate() {
+        capacity.insert((*m).clone(), (floor as usize) + usize::from(idx < extra));
+    }
+    // Trim anyone above their share (dropping the highest-numbered partitions).
+    for m in &members {
+        let cap = capacity[m];
+        let v = retained.get_mut(m).unwrap();
+        v.sort_unstable();
+        while v.len() > cap {
+            unassigned.push(v.pop().unwrap());
+        }
+    }
+    // Fill members below their share from the unassigned pool (sorted).
+    unassigned.sort_unstable();
+    let mut ui = 0;
+    for m in &members {
+        let cap = capacity[m];
+        let v = retained.get_mut(m).unwrap();
+        while v.len() < cap && ui < unassigned.len() {
+            v.push(unassigned[ui]);
+            ui += 1;
+        }
+        v.sort_unstable();
+    }
+    let assignment: serde_json::Map<String, Value> = members
+        .iter()
+        .map(|m| (m.clone(), json!(retained[m])))
+        .collect();
+    Ok(json!({
+        "assignment": assignment,
+        "partitions": partitions,
+        "consumers": members,
+    }))
+}
+
 /// Map between Kafka's special offset sentinels and their names: `-1` ⇄
 /// `latest`, `-2` ⇄ `earliest`. A concrete (non-negative) offset has a null
 /// name. Pass `offset` (number) or `name` (string). Pure.
@@ -1522,6 +1597,11 @@ pub extern "C" fn kafka__range_assignment(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn kafka__roundrobin_assignment(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_roundrobin_assignment(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__sticky_assignment(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_sticky_assignment(opts) })
 }
 
 #[no_mangle]
@@ -2495,6 +2575,75 @@ mod tests {
         assert!(op_roundrobin_assignment(json!({"consumers": ["a"]})).is_err());
         assert!(op_roundrobin_assignment(json!({"partitions": 0, "consumers": ["a"]})).is_err());
         assert!(op_roundrobin_assignment(json!({"partitions": 4, "consumers": []})).is_err());
+    }
+
+    #[test]
+    fn sticky_assignment_balances_and_minimizes_movement() {
+        let parts = |v: &Value, m: &str| {
+            v["assignment"][m]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        // No previous → deterministic balanced fill (ceil share to the first ids).
+        let fresh = op_sticky_assignment(json!({"partitions": 7, "consumers": ["c0", "c1", "c2"]}))
+            .unwrap();
+        assert_eq!(parts(&fresh, "c0"), vec![0, 1, 2]);
+        assert_eq!(parts(&fresh, "c1"), vec![3, 4]);
+        assert_eq!(parts(&fresh, "c2"), vec![5, 6]);
+
+        // A consumer leaves: survivors keep every partition they still own; only
+        // the departed member's partitions move.
+        let after_leave = op_sticky_assignment(json!({
+            "partitions": 7,
+            "consumers": ["c0", "c2"],
+            "previous": {"c0": [0, 1, 2], "c1": [3, 4], "c2": [5, 6]},
+        }))
+        .unwrap();
+        assert_eq!(parts(&after_leave, "c0"), vec![0, 1, 2, 3]);
+        assert_eq!(parts(&after_leave, "c2"), vec![4, 5, 6]);
+
+        // A consumer joins: it receives partitions shed by the over-full members;
+        // each incumbent gives up exactly what balance requires and no more.
+        let after_join = op_sticky_assignment(json!({
+            "partitions": 7,
+            "consumers": ["c0", "c1", "c2"],
+            "previous": {"c0": [0, 1, 2, 3], "c1": [4, 5, 6]},
+        }))
+        .unwrap();
+        assert_eq!(parts(&after_join, "c0"), vec![0, 1, 2]);
+        assert_eq!(parts(&after_join, "c1"), vec![4, 5]);
+        assert_eq!(parts(&after_join, "c2"), vec![3, 6]);
+
+        // Stale previous (departed-member owner, out-of-range and duplicate
+        // partitions) is ignored; the result is still a valid balanced cover.
+        let messy = op_sticky_assignment(json!({
+            "partitions": 5,
+            "consumers": ["a", "b"],
+            "previous": {"a": [0, 0, 99], "b": [1], "ghost": [2, 3, 4]},
+        }))
+        .unwrap();
+        let mut all: Vec<u64> = parts(&messy, "a")
+            .into_iter()
+            .chain(parts(&messy, "b"))
+            .collect();
+        all.sort_unstable();
+        assert_eq!(all, vec![0, 1, 2, 3, 4]); // exact cover, no dups
+        let (la, lb) = (parts(&messy, "a").len(), parts(&messy, "b").len());
+        assert!(la.abs_diff(lb) <= 1, "balanced: {la} vs {lb}");
+
+        // Balance invariant across several shapes.
+        for (p, cs) in [(10u64, 3usize), (12, 4), (5, 5), (1, 3)] {
+            let consumers: Vec<String> = (0..cs).map(|i| format!("c{i}")).collect();
+            let v = op_sticky_assignment(json!({"partitions": p, "consumers": consumers})).unwrap();
+            let sizes: Vec<usize> = consumers.iter().map(|m| parts(&v, m).len()).collect();
+            assert_eq!(sizes.iter().sum::<usize>(), p as usize);
+            assert!(sizes.iter().max().unwrap() - sizes.iter().min().unwrap() <= 1);
+        }
+        assert!(op_sticky_assignment(json!({"consumers": ["a"]})).is_err());
+        assert!(op_sticky_assignment(json!({"partitions": 4, "consumers": []})).is_err());
     }
 
     #[test]
