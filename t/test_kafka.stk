@@ -191,6 +191,19 @@ assert_eq $by->{brokers}[0]{leader_count}, 1,                   "assignment_by_b
 val $rt = Kafka::assignment_by_broker(Kafka::replica_assignment(10, 3, [0, 1, 2, 3, 4])->{assignment})
 assert_eq scalar(@{ $rt->{brokers} }), 5,                       "assignment_by_broker: all 5 brokers host partitions"
 assert_dies fn { Kafka::assignment_by_broker("nope") }, "assignment_by_broker: rejects a non-array assignment"
+
+# partition_owners: invert a consumer assignment to a partition→owner view.
+val $po = Kafka::partition_owners({ c1 => [0, 1, 2], c2 => [3, 4], c3 => [5] })
+assert_eq $po->{owners}{"0"}, "c1",  "partition_owners: partition 0 → c1"
+assert_eq $po->{owners}{"3"}, "c2",  "partition_owners: partition 3 → c2"
+assert_eq $po->{owners}{"5"}, "c3",  "partition_owners: partition 5 → c3"
+assert_eq $po->{partitions}, 6,      "partition_owners: total partitions"
+assert_eq $po->{consumers}, 3,       "partition_owners: total consumers"
+# round-trips range_assignment (every partition gets exactly one owner)
+val $rpo = Kafka::partition_owners(Kafka::range_assignment(7, "a", "b", "c")->{assignment})
+assert_eq $rpo->{partitions}, 7,     "partition_owners: round-trips range_assignment (all 7 owned)"
+assert_dies fn { Kafka::partition_owners({ a => [0, 1], b => [1, 2] }) }, "partition_owners: rejects an overlapping assignment"
+
 # assignment_diff: what moves between two assignments (rebalance planning).
 val $ad = Kafka::assignment_diff({ c0 => [0, 1, 2, 3], c1 => [4, 5, 6] }, { c0 => [0, 1, 2], c1 => [4, 5], c2 => [3, 6] })
 assert_eq join(",", @{ $ad->{revoked}{c0} }),  "3", "assignment_diff: c0 gives up partition 3"

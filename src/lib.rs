@@ -1625,6 +1625,48 @@ fn op_assignment_by_broker(opts: Value) -> Result<Value> {
     Ok(json!({ "brokers": brokers_out }))
 }
 
+/// Invert a consumer-group partition assignment (`{consumer: [partitions]}`, the
+/// output of range/roundrobin/sticky) into a partition→owner view: which consumer
+/// handles each partition. The complement of those assignment functions — a lookup
+/// for "who owns partition N", and the consumer-side analog of assignment_by_broker
+/// (which inverts the broker/replica assignment). Each partition must have exactly
+/// one owner, so a partition listed under two consumers is rejected as an invalid
+/// overlap. opts: `assignment` (required, consumer→[partitions]). Returns
+/// `{owners: {partition: consumer}, partitions, consumers}` (owners keyed by
+/// partition id, sorted). Pure.
+fn op_partition_owners(opts: Value) -> Result<Value> {
+    let map = opts
+        .get("assignment")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing assignment (an object of consumer -> [partitions])"))?;
+    let mut owners: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    for (consumer, parts) in map {
+        let arr = parts
+            .as_array()
+            .ok_or_else(|| anyhow!("`{consumer}` must map to an array of partitions"))?;
+        for p in arr {
+            let p = p
+                .as_u64()
+                .ok_or_else(|| anyhow!("partition must be a non-negative integer"))?;
+            if let Some(existing) = owners.get(&p) {
+                return Err(anyhow!(
+                    "partition {p} is assigned to both `{existing}` and `{consumer}`"
+                ));
+            }
+            owners.insert(p, consumer.clone());
+        }
+    }
+    let owners_obj: serde_json::Map<String, Value> = owners
+        .iter()
+        .map(|(p, c)| (p.to_string(), json!(c)))
+        .collect();
+    Ok(json!({
+        "owners": Value::Object(owners_obj),
+        "partitions": owners.len(),
+        "consumers": map.len(),
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1807,6 +1849,11 @@ pub extern "C" fn kafka__replica_assignment(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn kafka__assignment_diff(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_assignment_diff(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__partition_owners(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_partition_owners(opts) })
 }
 
 #[no_mangle]
@@ -2950,6 +2997,36 @@ mod tests {
         assert!(op_assignment_by_broker(json!({"assignment": "nope"})).is_err());
         assert!(op_assignment_by_broker(json!({"assignment": [{"partition": 0}]})).is_err());
         assert!(op_assignment_by_broker(json!({})).is_err());
+    }
+
+    #[test]
+    fn partition_owners_inverts_a_consumer_assignment() {
+        let v = op_partition_owners(json!({
+            "assignment": {"c1": [0, 1, 2], "c2": [3, 4], "c3": [5]}
+        }))
+        .unwrap();
+        // Each partition maps to its owning consumer (keys are partition ids).
+        assert_eq!(v["owners"]["0"], json!("c1"));
+        assert_eq!(v["owners"]["3"], json!("c2"));
+        assert_eq!(v["owners"]["5"], json!("c3"));
+        assert_eq!(v["partitions"], json!(6));
+        assert_eq!(v["consumers"], json!(3));
+        // Round-trips range_assignment: every partition 0..P-1 gets an owner.
+        let ra =
+            op_range_assignment(json!({"partitions": 7, "consumers": ["a", "b", "c"]})).unwrap();
+        let owners = op_partition_owners(json!({ "assignment": ra["assignment"] })).unwrap();
+        assert_eq!(owners["partitions"], json!(7), "all 7 partitions owned");
+        for p in 0..7 {
+            assert!(
+                owners["owners"].get(p.to_string()).is_some(),
+                "partition {p} has an owner"
+            );
+        }
+        // A partition assigned to two consumers is an invalid overlap.
+        assert!(op_partition_owners(json!({"assignment": {"a": [0, 1], "b": [1, 2]}})).is_err());
+        // Bad shapes and missing arg.
+        assert!(op_partition_owners(json!({"assignment": {"a": "nope"}})).is_err());
+        assert!(op_partition_owners(json!({})).is_err());
     }
 
     #[test]

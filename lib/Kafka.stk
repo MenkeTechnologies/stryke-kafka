@@ -356,6 +356,16 @@ fn Kafka::assignment_by_broker ($assignment) {
         kafka__assignment_by_broker(to_json({ assignment => $assignment })))
 }
 
+## Invert a consumer-group partition assignment ({ consumer => [partitions] }, the
+## output of range/roundrobin/sticky) to a partition->owner view: which consumer
+## handles each partition. The consumer-side analog of assignment_by_broker; each
+## partition must have exactly one owner, so an overlap is rejected. Returns a
+## hashref { owners => { partition => consumer }, partitions, consumers }.
+fn Kafka::partition_owners ($assignment) {
+    Kafka::_decode("partition_owners",
+        kafka__partition_owners(to_json({ assignment => $assignment })))
+}
+
 ## Diff two partition assignments ($previous and $current, each a hashref
 ## { consumer => [partition…] }) to plan a rebalance: what each member loses and
 ## gains. For the cooperative protocol, "revoked" is exactly the set to give up

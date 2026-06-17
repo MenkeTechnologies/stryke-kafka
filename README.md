@@ -276,6 +276,7 @@ Kafka::roundrobin_assignment($partitions, @consumers) → { assignment:{member:[
 Kafka::sticky_assignment($partitions, \@consumers, \%previous?) → { assignment:{member:[partition…]}, partitions, consumers }   # StickyAssignor (KIP-54): balanced but preserves \%previous to minimize rebalance movement
 Kafka::replica_assignment($partitions, $replication_factor, \@brokers, %opts) → { assignment:[{partition, replicas:[broker…]}], partitions, replication_factor }   # default rack-unaware partition→broker placement (kafka-topics --create); opts: start_index, start_partition
 Kafka::assignment_by_broker(\@assignment) → { brokers:[{broker, leader, replicas, leader_count, replica_count}] }   # invert a partition→broker assignment to a per-broker view (what each broker hosts/leads); inverse of replica_assignment
+Kafka::partition_owners(\%assignment) → { owners:{partition=>consumer}, partitions, consumers }   # invert a consumer assignment ({consumer=>[partitions]}) to "who owns partition N"; consumer-side analog of assignment_by_broker (overlap rejected)
 Kafka::assignment_diff(\%previous, \%current) → { revoked:{member:[partition…]}, assigned:{member:[partition…]}, moved }   # rebalance plan: what each member loses/gains; `revoked` = the cooperative-protocol give-up set
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
 ```
