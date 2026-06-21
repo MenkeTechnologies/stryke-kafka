@@ -113,9 +113,7 @@ val @msgs = Kafka::consume "events",
 
 # Callback per message (snapshot pull, then iterate).
 Kafka::consume_stream "events",
-    callback => fn ($m) {
-        p "$m->{partition}.$m->{offset}: $m->{value}"
-    }
+    callback => fn { p "$_->{partition}.$_->{offset}: $_->{value}" }
 
 # Admin / metadata.
 p $_ for Kafka::topics()
