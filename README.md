@@ -245,6 +245,12 @@ Kafka::acks_value($value)       → { value, acks, all }      # canonicalize pro
 Kafka::parse_duration_ms($value) → $ms                      # parse a duration (number or ms|s|m|h|d|w suffix) to millis; -1 passes through
 Kafka::isr_health(\@replicas, \@isr, $min_isr?) → { replicas, isr, min_isr, under_replicated, under_min_isr, healthy }   # assess partition replication health ($min_isr default 1)
 Kafka::offset_lag(\@partitions) → { partitions, total_lag }   # offline lag from [{partition, committed, high}] (committed -1/undef = full backlog); offline companion of lag
+Kafka::security_protocol($value) → { value, valid, canonical }   # validate/canonicalize security.protocol (PLAINTEXT|SSL|SASL_PLAINTEXT|SASL_SSL); canonical uppercase (3.3.0+)
+Kafka::auto_offset_reset($value) → { value, valid, canonical }   # validate/canonicalize auto.offset.reset (earliest|latest|none|by_duration:<dur>); by_duration re-emits millis
+Kafka::isolation_level($value)  → { value, valid, canonical, read_committed }   # validate/canonicalize isolation.level (read_uncommitted|read_committed)
+Kafka::timestamp_type($value)   → { value, valid, canonical }   # validate/canonicalize message.timestamp.type (CreateTime|LogAppendTime)
+Kafka::humanize_duration_ms($ms) → { ms, human, unit }      # inverse of parse_duration_ms: millis → largest exact unit (1w, 3d, 90s); -1 → "infinite"
+Kafka::partition_distribution(\@keys, $partitions, %opts) → { partitions, partitioner, total, counts, used, empty, max, min, spread }   # offline key-skew tally (opts: partitioner murmur2|crc32|fnv1a)
 ```
 
 `partition_for_key` is a faithful port of Kafka's `Utils.murmur2` (seed

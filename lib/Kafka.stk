@@ -471,3 +471,57 @@ fn Kafka::offset_lag ($partitions) {
     Kafka::_decode("offset_lag", kafka__offset_lag(to_json({ partitions => $partitions })))
 }
 
+## Validate and canonicalize a security.protocol value (PLAINTEXT | SSL |
+## SASL_PLAINTEXT | SASL_SSL). Case-insensitive (pre-3.3.0 lowercase accepted);
+## the canonical form is the uppercase member Kafka 3.3.0+ requires. Returns a
+## hashref { value, valid, canonical } — canonical is undef when invalid.
+fn Kafka::security_protocol ($value) {
+    Kafka::_decode("security_protocol", kafka__security_protocol(to_json({ value => $value })))
+}
+
+## Validate and canonicalize a consumer auto.offset.reset value (earliest |
+## latest | none, plus the by_duration:<dur> form). The embedded duration in
+## by_duration is re-emitted in canonical millis (by_duration:604800000); a
+## malformed duration makes the whole value invalid. Returns a hashref
+## { value, valid, canonical } — canonical is undef when invalid.
+fn Kafka::auto_offset_reset ($value) {
+    Kafka::_decode("auto_offset_reset", kafka__auto_offset_reset(to_json({ value => $value })))
+}
+
+## Validate and canonicalize a consumer isolation.level value (read_uncommitted |
+## read_committed). Case-insensitive. Returns a hashref { value, valid, canonical,
+## read_committed } — read_committed is true only for the read_committed level.
+fn Kafka::isolation_level ($value) {
+    Kafka::_decode("isolation_level", kafka__isolation_level(to_json({ value => $value })))
+}
+
+## Validate and canonicalize a message.timestamp.type / log.message.timestamp.type
+## value (CreateTime | LogAppendTime). Case-insensitive; canonical is Kafka's
+## mixed-case spelling. Returns a hashref { value, valid, canonical } — canonical
+## is undef when invalid.
+fn Kafka::timestamp_type ($value) {
+    Kafka::_decode("timestamp_type", kafka__timestamp_type(to_json({ value => $value })))
+}
+
+## Render a millisecond duration as the compact string parse_duration_ms reads
+## back (inverse of that parser) — the largest unit that divides $ms exactly
+## (w|d|h|m|s, else raw ms). Kafka's -1 infinite sentinel renders as "infinite".
+## Returns a hashref { ms, human, unit }.
+fn Kafka::humanize_duration_ms ($ms) {
+    Kafka::_decode("humanize_duration_ms", kafka__humanize_duration_ms(to_json({ value => $ms })))
+}
+
+## Predict how @keys spread across $partitions under a client-side partitioner —
+## the offline skew analysis paired with partition_for_key. %opts: partitioner
+## (murmur2 (default, JVM) | crc32 (librdkafka consistent) | fnv1a). Returns a
+## hashref { partitions, partitioner, total, counts => [count-per-partition], used,
+## empty, max, min, spread } where spread = max - min (0 = perfectly even).
+fn Kafka::partition_distribution ($keys, $partitions, %opts) {
+    die "Kafka::partition_distribution: keys must be arrayref" unless ref($keys) eq "ARRAY"
+    Kafka::_decode("partition_distribution", kafka__partition_distribution(to_json({
+        keys        => $keys,
+        partitions  => $partitions,
+        partitioner => $opts{partitioner},
+    })))
+}
+

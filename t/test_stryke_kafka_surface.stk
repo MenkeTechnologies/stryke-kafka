@@ -69,5 +69,11 @@ assert_ok exists &Kafka::acks_value, "Kafka::acks_value exists"
 assert_ok exists &Kafka::parse_duration_ms, "Kafka::parse_duration_ms exists"
 assert_ok exists &Kafka::isr_health, "Kafka::isr_health exists"
 assert_ok exists &Kafka::offset_lag, "Kafka::offset_lag exists"
+assert_ok exists &Kafka::security_protocol, "Kafka::security_protocol exists"
+assert_ok exists &Kafka::auto_offset_reset, "Kafka::auto_offset_reset exists"
+assert_ok exists &Kafka::isolation_level, "Kafka::isolation_level exists"
+assert_ok exists &Kafka::timestamp_type, "Kafka::timestamp_type exists"
+assert_ok exists &Kafka::humanize_duration_ms, "Kafka::humanize_duration_ms exists"
+assert_ok exists &Kafka::partition_distribution, "Kafka::partition_distribution exists"
 
 test_run

@@ -251,4 +251,33 @@ assert_eq $ol->{partitions}[0]{lag}, 50, "offset_lag: high - committed"
 assert_eq $ol->{partitions}[1]{lag}, 25, "offset_lag: no commit → full backlog"
 assert_eq $ol->{total_lag}, 75,          "offset_lag: total across partitions"
 
+# security_protocol: validate + uppercase canonical.
+assert_eq Kafka::security_protocol("sasl_ssl")->{canonical}, "SASL_SSL", "security_protocol: lowercase canonicalized up"
+assert_eq Kafka::security_protocol("kerberos")->{valid}, 0,             "security_protocol: rejects unknown protocol"
+
+# auto_offset_reset: keywords + by_duration form.
+assert_eq Kafka::auto_offset_reset("EARLIEST")->{canonical}, "earliest",            "auto_offset_reset: keyword canonical"
+assert_eq Kafka::auto_offset_reset("by_duration:7d")->{canonical}, "by_duration:604800000", "auto_offset_reset: by_duration re-emits millis"
+assert_eq Kafka::auto_offset_reset("smallest")->{valid}, 0,                          "auto_offset_reset: rejects unknown keyword"
+
+# isolation_level: read_committed flag.
+assert_eq Kafka::isolation_level("read_committed")->{read_committed}, 1, "isolation_level: read_committed flag set"
+assert_eq Kafka::isolation_level("read_uncommitted")->{read_committed}, 0, "isolation_level: read_uncommitted flag clear"
+
+# timestamp_type: mixed-case canonical.
+assert_eq Kafka::timestamp_type("logappendtime")->{canonical}, "LogAppendTime", "timestamp_type: canonical spelling"
+assert_eq Kafka::timestamp_type("wallclock")->{valid}, 0,                       "timestamp_type: rejects unknown type"
+
+# humanize_duration_ms: inverse of parse_duration_ms.
+assert_eq Kafka::humanize_duration_ms(604800000)->{human}, "1w",       "humanize_duration_ms: a week is the largest exact unit"
+assert_eq Kafka::humanize_duration_ms(259200000)->{human}, "3d",       "humanize_duration_ms: 3 days (no exact week) falls back to days"
+assert_eq Kafka::humanize_duration_ms(-1)->{human}, "infinite",        "humanize_duration_ms: infinite sentinel"
+assert_eq Kafka::parse_duration_ms(Kafka::humanize_duration_ms(90000)->{human}), 90000, "humanize_duration_ms: round-trips through parse_duration_ms"
+
+# partition_distribution: key skew across partitions.
+val $pd = Kafka::partition_distribution(["a", "b", "c", "a", "a"], 4)
+assert_eq $pd->{total}, 5, "partition_distribution: total counts every key"
+assert_eq scalar(@{ $pd->{counts} }), 4, "partition_distribution: one count slot per partition"
+assert_eq $pd->{spread}, $pd->{max} - $pd->{min}, "partition_distribution: spread = max - min"
+
 test_run

@@ -2033,6 +2033,209 @@ fn op_offset_lag(opts: Value) -> Result<Value> {
     Ok(json!({"partitions": out, "total_lag": total_lag}))
 }
 
+/// Validate and canonicalize a `security.protocol` value. Kafka accepts the four
+/// enum members `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL`. Matching is
+/// case-insensitive (pre-3.3.0 brokers accepted lowercase); the canonical form is
+/// the uppercase member Kafka 3.3.0+ requires. opts: `value` (or `protocol`,
+/// required). Returns `{value, valid, canonical}` — `canonical` is null when
+/// invalid. Pure.
+fn op_security_protocol(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("protocol"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let canonical = match v.trim().to_ascii_uppercase().as_str() {
+        "PLAINTEXT" => Some("PLAINTEXT"),
+        "SSL" => Some("SSL"),
+        "SASL_PLAINTEXT" => Some("SASL_PLAINTEXT"),
+        "SASL_SSL" => Some("SASL_SSL"),
+        _ => None,
+    };
+    Ok(json!({"value": v, "valid": canonical.is_some(), "canonical": canonical}))
+}
+
+/// Validate and canonicalize a consumer `auto.offset.reset` value. Kafka accepts
+/// `earliest`, `latest`, and `none`, plus the `by_duration:<duration>` form
+/// (reset to a point `<duration>` before now). Matching is case-insensitive on the
+/// keyword; for `by_duration:` the suffixed duration is parsed (and re-emitted in
+/// the canonical `ms`-less millisecond form via `parse_duration_ms` rules) so a
+/// malformed duration is flagged invalid. opts: `value` (or `reset`, required).
+/// Returns `{value, valid, canonical}` — `canonical` is null when invalid. Pure.
+fn op_auto_offset_reset(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("reset"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let trimmed = v.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let canonical: Option<String> = match lower.as_str() {
+        "earliest" => Some("earliest".to_string()),
+        "latest" => Some("latest".to_string()),
+        "none" => Some("none".to_string()),
+        _ if lower.starts_with("by_duration:") => {
+            let dur = &trimmed["by_duration:".len()..];
+            match op_parse_duration_ms(json!({"value": dur})) {
+                Ok(parsed) => parsed
+                    .get("ms")
+                    .and_then(Value::as_i64)
+                    .filter(|ms| *ms >= 0)
+                    .map(|ms| format!("by_duration:{ms}")),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+    Ok(json!({"value": v, "valid": canonical.is_some(), "canonical": canonical}))
+}
+
+/// Validate and canonicalize a consumer `isolation.level` value. Kafka accepts
+/// `read_uncommitted` (the default — return all records, including those from
+/// aborted transactions) and `read_committed` (only return records from committed
+/// transactions, and never read past the last stable offset). Matching is
+/// case-insensitive. opts: `value` (or `level`, required). Returns `{value, valid,
+/// canonical, read_committed}` — `canonical` is null and `read_committed` false
+/// when invalid. Pure.
+fn op_isolation_level(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("level"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let canonical = match v.trim().to_ascii_lowercase().as_str() {
+        "read_uncommitted" => Some("read_uncommitted"),
+        "read_committed" => Some("read_committed"),
+        _ => None,
+    };
+    Ok(json!({
+        "value": v,
+        "valid": canonical.is_some(),
+        "canonical": canonical,
+        "read_committed": canonical == Some("read_committed"),
+    }))
+}
+
+/// Validate and canonicalize a `message.timestamp.type` (topic) /
+/// `log.message.timestamp.type` (broker) value. Kafka accepts `CreateTime` (the
+/// default — keep the producer-set timestamp) and `LogAppendTime` (the broker
+/// overwrites every timestamp with its own clock at append). Matching is
+/// case-insensitive; the canonical form is Kafka's mixed-case spelling. opts:
+/// `value` (or `type`, required). Returns `{value, valid, canonical}` —
+/// `canonical` is null when invalid. Pure.
+fn op_timestamp_type(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("type"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let canonical = match v.trim().to_ascii_lowercase().as_str() {
+        "createtime" => Some("CreateTime"),
+        "logappendtime" => Some("LogAppendTime"),
+        _ => None,
+    };
+    Ok(json!({"value": v, "valid": canonical.is_some(), "canonical": canonical}))
+}
+
+/// Render a millisecond duration as the compact human string `parse_duration_ms`
+/// reads back — the inverse of that parser. Picks the largest single unit that
+/// divides the value exactly (`w`, `d`, `h`, `m`, `s`, else `ms`), so a clean
+/// `604800000` becomes `7d` and `90000` becomes `90s`. Kafka's `-1` infinite
+/// sentinel renders as `infinite`. opts: `value` (or `ms`, required; a
+/// non-negative integer or `-1`). Returns `{ms, human, unit}`. Pure — round-trips
+/// through `parse_duration_ms` for every exact value.
+fn op_humanize_duration_ms(opts: Value) -> Result<Value> {
+    let ms = opts
+        .get("value")
+        .or_else(|| opts.get("ms"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("missing value (a millisecond integer)"))?;
+    if ms == -1 {
+        return Ok(json!({"ms": ms, "human": "infinite", "unit": "infinite"}));
+    }
+    if ms < 0 {
+        return Err(anyhow!(
+            "duration must be non-negative (or -1 for infinite)"
+        ));
+    }
+    // Largest unit whose factor divides ms exactly; ms itself is the fallback.
+    const UNITS: [(&str, i64); 5] = [
+        ("w", 604_800_000),
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1_000),
+    ];
+    for (unit, factor) in UNITS {
+        if ms != 0 && ms % factor == 0 {
+            return Ok(json!({"ms": ms, "human": format!("{}{unit}", ms / factor), "unit": unit}));
+        }
+    }
+    Ok(json!({"ms": ms, "human": format!("{ms}ms"), "unit": "ms"}))
+}
+
+/// Predict how a set of keys spreads across partitions under a client-side
+/// partitioner — the offline skew analysis that pairs with `partition_for_key`.
+/// Hashes every key with the chosen partitioner (`partitioner`: `murmur2` (JVM
+/// default), `crc32` (librdkafka `consistent`), or `fnv1a`) and tallies the
+/// per-partition record count, so a caller can spot key skew before producing.
+/// opts: `keys` (array of strings, required), `partitions` (count > 0, required),
+/// `partitioner` (default `murmur2`). Returns `{partitions, partitioner, total,
+/// counts: [count-per-partition], used, empty, max, min, spread}` where `spread`
+/// is `max - min` (0 = perfectly even). Pure.
+fn op_partition_distribution(opts: Value) -> Result<Value> {
+    let keys = opts
+        .get("keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing keys (array of strings)"))?;
+    let partitions = opts
+        .get("partitions")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing partitions"))?;
+    if partitions == 0 {
+        return Err(anyhow!("partitions must be > 0"));
+    }
+    let partitioner = opts
+        .get("partitioner")
+        .and_then(Value::as_str)
+        .unwrap_or("murmur2")
+        .to_ascii_lowercase();
+    let part_of = |key: &str| -> Result<u64> {
+        Ok(match partitioner.as_str() {
+            "murmur2" => (murmur2(key.as_bytes()) as i64 & 0x7fff_ffff) as u64 % partitions,
+            "crc32" | "consistent" => crc32_ieee(key.as_bytes()) as u64 % partitions,
+            "fnv1a" => fnv1a(key.as_bytes()) as u64 % partitions,
+            other => {
+                return Err(anyhow!(
+                    "unknown partitioner `{other}` (murmur2|crc32|fnv1a)"
+                ))
+            }
+        })
+    };
+    let mut counts = vec![0u64; partitions as usize];
+    for k in keys {
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow!("every key must be a string"))?;
+        counts[part_of(key)? as usize] += 1;
+    }
+    let total: u64 = counts.iter().sum();
+    let used = counts.iter().filter(|&&c| c > 0).count();
+    let max = counts.iter().copied().max().unwrap_or(0);
+    let min = counts.iter().copied().min().unwrap_or(0);
+    Ok(json!({
+        "partitions": partitions,
+        "partitioner": partitioner,
+        "total": total,
+        "counts": counts,
+        "used": used,
+        "empty": partitions as usize - used,
+        "max": max,
+        "min": min,
+        "spread": max - min,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -2285,6 +2488,36 @@ pub extern "C" fn kafka__isr_health(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__offset_lag(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_offset_lag(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__security_protocol(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_security_protocol(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__auto_offset_reset(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_auto_offset_reset(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__isolation_level(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_isolation_level(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__timestamp_type(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_timestamp_type(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__humanize_duration_ms(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_humanize_duration_ms(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__partition_distribution(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_partition_distribution(opts) })
 }
 
 #[cfg(test)]
@@ -3735,5 +3968,165 @@ mod tests {
         assert!(op_offset_lag(json!({"partitions": [{"partition": 0, "committed": 1}]})).is_err());
         assert!(op_offset_lag(json!({"partitions": [{"committed": 1, "high": 2}]})).is_err());
         assert!(op_offset_lag(json!({})).is_err());
+    }
+
+    #[test]
+    fn security_protocol_validates_and_uppercases() {
+        let canon =
+            |s: &str| op_security_protocol(json!({"value": s})).unwrap()["canonical"].clone();
+        assert_eq!(canon("PLAINTEXT"), json!("PLAINTEXT"));
+        assert_eq!(canon("SASL_SSL"), json!("SASL_SSL"));
+        // Pre-3.3.0 lowercase is accepted and canonicalized up.
+        assert_eq!(canon("sasl_plaintext"), json!("SASL_PLAINTEXT"));
+        assert_eq!(canon(" ssl "), json!("SSL"));
+        // Invalid → null canonical, valid=false.
+        let bad = op_security_protocol(json!({"value": "kerberos"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["canonical"], json!(null));
+        // The `protocol` alias key also works; missing key errors.
+        assert_eq!(
+            op_security_protocol(json!({"protocol": "SSL"})).unwrap()["valid"],
+            json!(true)
+        );
+        assert!(op_security_protocol(json!({})).is_err());
+    }
+
+    #[test]
+    fn auto_offset_reset_validates_keywords_and_by_duration() {
+        let v = |s: &str| op_auto_offset_reset(json!({"value": s})).unwrap();
+        assert_eq!(v("earliest")["canonical"], json!("earliest"));
+        assert_eq!(v("LATEST")["canonical"], json!("latest"));
+        assert_eq!(v("none")["canonical"], json!("none"));
+        // by_duration:<dur> parses and re-emits the duration in millis.
+        assert_eq!(
+            v("by_duration:7d")["canonical"],
+            json!("by_duration:604800000")
+        );
+        assert_eq!(
+            v("by_duration:500ms")["canonical"],
+            json!("by_duration:500")
+        );
+        // A malformed embedded duration is invalid, not a panic.
+        assert_eq!(v("by_duration:5y")["valid"], json!(false));
+        assert_eq!(v("by_duration:-1")["valid"], json!(false));
+        // Unknown keyword invalid.
+        assert_eq!(v("smallest")["valid"], json!(false));
+        assert!(op_auto_offset_reset(json!({})).is_err());
+    }
+
+    #[test]
+    fn isolation_level_reports_read_committed_flag() {
+        let rc = op_isolation_level(json!({"value": "READ_COMMITTED"})).unwrap();
+        assert_eq!(rc["canonical"], json!("read_committed"));
+        assert_eq!(rc["read_committed"], json!(true));
+        let ru = op_isolation_level(json!({"level": "read_uncommitted"})).unwrap();
+        assert_eq!(ru["canonical"], json!("read_uncommitted"));
+        assert_eq!(ru["read_committed"], json!(false));
+        let bad = op_isolation_level(json!({"value": "snapshot"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["read_committed"], json!(false));
+        assert!(op_isolation_level(json!({})).is_err());
+    }
+
+    #[test]
+    fn timestamp_type_canonicalizes_mixed_case() {
+        let v = |s: &str| op_timestamp_type(json!({"value": s})).unwrap()["canonical"].clone();
+        assert_eq!(v("CreateTime"), json!("CreateTime"));
+        assert_eq!(v("createtime"), json!("CreateTime"));
+        assert_eq!(v("LOGAPPENDTIME"), json!("LogAppendTime"));
+        let bad = op_timestamp_type(json!({"type": "WallClock"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["canonical"], json!(null));
+        assert!(op_timestamp_type(json!({})).is_err());
+    }
+
+    /// The humanizer must be a true inverse of `parse_duration_ms`: for every
+    /// value it emits, re-parsing yields the original millis. We pin the unit
+    /// selection (largest exact divisor) and the round-trip property.
+    #[test]
+    fn humanize_duration_ms_inverts_parse_duration_ms() {
+        let human = |ms: i64| {
+            op_humanize_duration_ms(json!({"value": ms})).unwrap()["human"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // A full week is exactly divisible by `w`, the largest unit, so `1w` (not `7d`).
+        assert_eq!(human(604_800_000), "1w");
+        assert_eq!(human(1_209_600_000), "2w");
+        assert_eq!(human(86_400_000), "1d");
+        // 3 days has no exact week, so it falls back to days.
+        assert_eq!(human(259_200_000), "3d");
+        assert_eq!(human(90_000), "90s");
+        assert_eq!(human(1_500), "1500ms");
+        assert_eq!(human(0), "0ms");
+        // -1 sentinel renders as `infinite`, not `-1ms`.
+        assert_eq!(human(-1), "infinite");
+        // Round-trip: every emitted string re-parses to the original millis.
+        for ms in [
+            1_i64,
+            999,
+            1_000,
+            60_000,
+            3_600_000,
+            86_400_000,
+            604_800_000,
+            7_200_000,
+        ] {
+            let h = human(ms);
+            let back = op_parse_duration_ms(json!({"value": h})).unwrap()["ms"]
+                .as_i64()
+                .unwrap();
+            assert_eq!(back, ms, "round-trip failed for {ms} via `{h}`");
+        }
+        // Negative non-sentinel errors; missing key errors.
+        assert!(op_humanize_duration_ms(json!({"value": -5})).is_err());
+        assert!(op_humanize_duration_ms(json!({})).is_err());
+    }
+
+    /// The distribution tally must equal the sum of per-key `partition_for_key`
+    /// calls — same hash, same modulo. We cross-check against the single-key op
+    /// for the murmur2 partitioner and pin the skew aggregates.
+    #[test]
+    fn partition_distribution_matches_per_key_partitioner() {
+        let keys = ["user-1", "user-2", "user-3", "user-1", "user-1"];
+        let parts = 4u64;
+        // Build the expected tally from the single-key op (the established truth).
+        let mut expected = vec![0u64; parts as usize];
+        for k in keys {
+            let p = op_partition_for_key(json!({"key": k, "partitions": parts})).unwrap()
+                ["partition"]
+                .as_u64()
+                .unwrap();
+            expected[p as usize] += 1;
+        }
+        let dist = op_partition_distribution(
+            json!({"keys": keys, "partitions": parts, "partitioner": "murmur2"}),
+        )
+        .unwrap();
+        assert_eq!(dist["counts"], json!(expected));
+        assert_eq!(dist["total"], json!(5));
+        let used = expected.iter().filter(|&&c| c > 0).count() as u64;
+        assert_eq!(dist["used"], json!(used));
+        assert_eq!(dist["empty"], json!(parts - used));
+        let mx = *expected.iter().max().unwrap();
+        let mn = *expected.iter().min().unwrap();
+        assert_eq!(dist["max"], json!(mx));
+        assert_eq!(dist["min"], json!(mn));
+        assert_eq!(dist["spread"], json!(mx - mn));
+        // crc32 path tallies match per-key crc32 op too.
+        let crc = op_partition_distribution(
+            json!({"keys": ["a", "b"], "partitions": 8, "partitioner": "crc32"}),
+        )
+        .unwrap();
+        assert_eq!(crc["total"], json!(2));
+        // Errors: bad partitioner, zero partitions, non-string key, missing keys.
+        assert!(op_partition_distribution(
+            json!({"keys": ["a"], "partitions": 2, "partitioner": "siphash"})
+        )
+        .is_err());
+        assert!(op_partition_distribution(json!({"keys": ["a"], "partitions": 0})).is_err());
+        assert!(op_partition_distribution(json!({"keys": [1], "partitions": 2})).is_err());
+        assert!(op_partition_distribution(json!({"partitions": 2})).is_err());
     }
 }

@@ -60,6 +60,12 @@ exports = [
     "kafka__parse_duration_ms",
     "kafka__isr_health",
     "kafka__offset_lag",
+    "kafka__security_protocol",
+    "kafka__auto_offset_reset",
+    "kafka__isolation_level",
+    "kafka__timestamp_type",
+    "kafka__humanize_duration_ms",
+    "kafka__partition_distribution",
 ]
 
 [scripts]
