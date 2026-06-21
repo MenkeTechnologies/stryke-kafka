@@ -199,6 +199,34 @@ fn Kafka::delete_groups ($groups, %opts) {
         kafka__delete_groups(to_json(Kafka::_req({ groups => $groups }, \%opts))))
 }
 
+## Truncate a $partition of $topic: delete all records with offset < $before.
+## $before is a concrete offset, or "latest"/-1 to delete everything currently
+## in the partition. Returns { topic, partition, results => [{ topic, partition,
+## low_watermark }] }.
+fn Kafka::delete_records ($topic, $partition, $before, %opts) {
+    Kafka::_decode("delete_records",
+        kafka__delete_records(to_json(Kafka::_req(
+            { topic => $topic, partition => $partition, before => $before }, \%opts))))
+}
+
+## Describe one consumer $group: state, protocol, and per-member detail
+## (member_id, client_id, client_host). Returns { name, state, protocol,
+## protocol_type, member_count, members => [...] }.
+fn Kafka::describe_group ($group, %opts) {
+    Kafka::_decode("describe_group",
+        kafka__describe_group(to_json(Kafka::_req({ group => $group }, \%opts))))
+}
+
+## Committed offsets for $group on a topic (opts: topic required; partition to
+## scope to one). A null committed offset means the group never committed there.
+## Returns { group, topic, partitions => [{ partition, committed }] }.
+fn Kafka::committed ($group, %opts) {
+    die "Kafka::committed: topic => 'name' required" unless defined $opts{topic}
+    Kafka::_decode("committed",
+        kafka__committed(to_json(Kafka::_req(
+            { group => $group, topic => $opts{topic}, partition => $opts{partition} }, \%opts))))
+}
+
 # ── pure helpers (no broker) ──────────────────────────────────────────
 
 ## Validate a topic name against the broker rule (1-249 chars of
@@ -372,5 +400,74 @@ fn Kafka::assignment_diff ($previous, $current) {
 fn Kafka::format_offset ($offset_or_name) {
     val $req = ($offset_or_name =~ /^-?\d+$/) ? { offset => $offset_or_name + 0 } : { name => $offset_or_name }
     Kafka::_decode("format_offset", kafka__format_offset(to_json($req)))
+}
+
+## Kafka's metric-namespace mangling for a single topic name — replace every "."
+## with "_" (unifyCollisionChars). The single-name companion of topics_collide.
+## Returns a hashref { name, metric_name, has_collision_chars }.
+fn Kafka::topic_metric_name ($name) {
+    Kafka::_decode("topic_metric_name", kafka__topic_metric_name(to_json({ name => $name })))
+}
+
+## Parse a "topic-partition" string into { topic, partition }. The partition is
+## the suffix after the final "-" (a ":" separator is also accepted, "topic:N"),
+## so a topic may itself contain "-" / ".". Inverse of format_topic_partition.
+fn Kafka::parse_topic_partition ($value) {
+    Kafka::_decode("parse_topic_partition", kafka__parse_topic_partition(to_json({ value => $value })))
+}
+
+## Build a "topic-partition" string from $topic and $partition — inverse of
+## parse_topic_partition. $separator defaults to "-" (pass ":" for "topic:N").
+## Returns the "topic-N" string.
+fn Kafka::format_topic_partition ($topic, $partition, $separator = "-") {
+    Kafka::_decode("format_topic_partition",
+        kafka__format_topic_partition(to_json({ topic => $topic, partition => $partition, separator => $separator })))->{value}
+}
+
+## Validate and canonicalize a compression.type value (none|gzip|snappy|lz4|zstd,
+## plus the broker-side `producer` alias). Case-insensitive. Returns a hashref
+## { value, valid, canonical } — canonical is undef when invalid.
+fn Kafka::compression_codec ($value) {
+    Kafka::_decode("compression_codec", kafka__compression_codec(to_json({ value => $value })))
+}
+
+## Validate and canonicalize a cleanup.policy value (delete | compact | both).
+## The canonical form lists policies in a stable order (compact,delete). Returns
+## a hashref { value, valid, canonical, policies }.
+fn Kafka::cleanup_policy ($value) {
+    Kafka::_decode("cleanup_policy", kafka__cleanup_policy(to_json({ value => $value })))
+}
+
+## Canonicalize a producer acks value (0 | 1 | all/-1) to its numeric form.
+## Returns a hashref { value, acks, all } — `all` is true for acks=-1 (full ISR
+## durability). Dies on any other value.
+fn Kafka::acks_value ($value) {
+    Kafka::_decode("acks_value", kafka__acks_value(to_json({ value => $value })))
+}
+
+## Parse a human duration into milliseconds — the unit Kafka topic configs use
+## (retention.ms, segment.ms, …). Accepts a plain number (already millis) or a
+## suffixed string (ms|s|m|h|d|w, e.g. "7d", "12h", "500ms"); Kafka's -1 infinite
+## sentinel passes through. Returns the integer milliseconds.
+fn Kafka::parse_duration_ms ($value) {
+    Kafka::_decode("parse_duration_ms", kafka__parse_duration_ms(to_json({ value => $value })))->{ms}
+}
+
+## Assess a partition's replication health from its $replicas and $isr broker-id
+## arrayrefs and the topic's min.insync.replicas ($min_isr, default 1). Returns a
+## hashref { replicas, isr, min_isr, under_replicated, under_min_isr, healthy }.
+fn Kafka::isr_health ($replicas, $isr, $min_isr = 1) {
+    Kafka::_decode("isr_health",
+        kafka__isr_health(to_json({ replicas => $replicas, isr => $isr, min_isr => $min_isr })))
+}
+
+## Compute consumer lag offline from committed offsets + high watermarks — the
+## offline companion of lag. $partitions is an arrayref of { partition, committed,
+## high } hashrefs (a committed of -1/undef means no commit → lag is the full
+## backlog). Returns a hashref { partitions => [{ partition, committed, high, lag }],
+## total_lag }.
+fn Kafka::offset_lag ($partitions) {
+    die "Kafka::offset_lag: partitions must be arrayref" unless ref($partitions) eq "ARRAY"
+    Kafka::_decode("offset_lag", kafka__offset_lag(to_json({ partitions => $partitions })))
 }
 

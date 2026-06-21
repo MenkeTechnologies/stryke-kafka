@@ -793,6 +793,122 @@ async fn op_delete_groups(opts: Value) -> Result<Value> {
     Ok(json!({"deleted": deleted, "errors": errors}))
 }
 
+async fn op_delete_records(opts: Value) -> Result<Value> {
+    let topic = opts["topic"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing topic"))?
+        .to_string();
+    let partition = opts["partition"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("missing partition"))? as i32;
+    // `before` is the low-watermark to truncate to: all records with offset <
+    // `before` on the partition are deleted. Accepts a concrete offset or the
+    // `-1`/`latest` sentinel (delete everything currently in the partition).
+    let before = match &opts["before"] {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| anyhow!("before must be an integer offset"))?,
+        Value::String(s) => match s.as_str() {
+            "latest" | "end" | "-1" => -1,
+            other => other
+                .parse::<i64>()
+                .map_err(|_| anyhow!("before must be an integer offset or `latest`"))?,
+        },
+        Value::Null => {
+            return Err(anyhow!(
+                "missing before (offset to truncate to, or `latest`)"
+            ))
+        }
+        _ => return Err(anyhow!("before must be an integer offset or `latest`")),
+    };
+    let admin = get_admin(&opts)?;
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(&topic, partition, Offset::Offset(before))
+        .context("seeding delete_records request")?;
+    let result = admin.delete_records(&tpl, &AdminOptions::new()).await?;
+    let rows: Vec<Value> = result
+        .elements()
+        .iter()
+        .map(|e| {
+            let low = match e.offset() {
+                Offset::Offset(o) => Some(o),
+                _ => None,
+            };
+            json!({"topic": e.topic(), "partition": e.partition(), "low_watermark": low})
+        })
+        .collect();
+    Ok(json!({"topic": topic, "partition": partition, "results": rows}))
+}
+
+async fn op_describe_group(opts: Value) -> Result<Value> {
+    let group = opts["group"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing group"))?
+        .to_string();
+    let admin = get_admin(&opts)?;
+    let list = admin
+        .inner()
+        .fetch_group_list(Some(&group), Timeout::After(Duration::from_secs(5)))?;
+    let info = list
+        .groups()
+        .iter()
+        .find(|g| g.name() == group)
+        .ok_or_else(|| anyhow!("group `{group}` not found"))?;
+    let members: Vec<Value> = info
+        .members()
+        .iter()
+        .map(|m| {
+            json!({
+                "member_id": m.id(),
+                "client_id": m.client_id(),
+                "client_host": m.client_host(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "name": info.name(),
+        "state": info.state(),
+        "protocol": info.protocol(),
+        "protocol_type": info.protocol_type(),
+        "member_count": members.len(),
+        "members": members,
+    }))
+}
+
+async fn op_committed(opts: Value) -> Result<Value> {
+    let group = opts["group"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing group"))?
+        .to_string();
+    let topic = opts["topic"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing topic"))?
+        .to_string();
+    let consumer = make_base_consumer(&opts, Some(&group))?;
+    // A specific partition, or every partition of the topic.
+    let parts: Vec<i32> = match opts["partition"].as_i64() {
+        Some(p) => vec![p as i32],
+        None => topic_partition_ids(&consumer, &topic)?,
+    };
+    let mut tpl = TopicPartitionList::new();
+    for p in &parts {
+        tpl.add_partition(&topic, *p);
+    }
+    let committed = consumer.committed_offsets(tpl, Timeout::After(Duration::from_secs(5)))?;
+    let rows: Vec<Value> = committed
+        .elements()
+        .iter()
+        .map(|e| {
+            let off = match e.offset() {
+                Offset::Offset(o) => Some(o),
+                _ => None, // no commit yet for this partition
+            };
+            json!({"partition": e.partition(), "committed": off})
+        })
+        .collect();
+    Ok(json!({"group": group, "topic": topic, "partitions": rows}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call_async<F, Fut>(args: *const c_char, handler: F) -> *const c_char
@@ -1625,6 +1741,298 @@ fn op_assignment_by_broker(opts: Value) -> Result<Value> {
     Ok(json!({ "brokers": brokers_out }))
 }
 
+/// Kafka's metric-namespace mangling for a single topic — replace every `.`
+/// with `_` (`unifyCollisionChars`). The unified form is what Kafka uses to key
+/// per-topic metrics, so `my.topic` and `my_topic` share one metric. The
+/// single-name companion of `topics_collide`. opts: `name` (required). Returns
+/// `{name, metric_name, has_collision_chars}`. Pure.
+fn op_topic_metric_name(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let metric = name.replace('.', "_");
+    Ok(json!({
+        "name": name,
+        "metric_name": metric,
+        "has_collision_chars": name.contains('.') || name.contains('_'),
+    }))
+}
+
+/// Parse a `topic-partition` string into its parts. librdkafka, Kafka tools, and
+/// `__consumer_offsets` keys all spell a topic-partition as `topic-N` (the
+/// partition is the suffix after the final `-`); a `:` separator is also
+/// accepted (`topic:N`). The partition must be a non-negative integer; the topic
+/// itself may contain `-` or `.`, so only the final separator splits. opts:
+/// `value` (or `tp`, required). Returns `{topic, partition}`. Pure. Inverse of
+/// `format_topic_partition`.
+fn op_parse_topic_partition(opts: Value) -> Result<Value> {
+    let s = opts
+        .get("value")
+        .or_else(|| opts.get("tp"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    // Prefer a `:` separator (unambiguous); otherwise split on the final `-`.
+    let (topic, part) = match s.rsplit_once(':') {
+        Some((t, p)) => (t, p),
+        None => s.rsplit_once('-').ok_or_else(|| {
+            anyhow!("`{s}` is not a topic-partition (want `topic-N` or `topic:N`)")
+        })?,
+    };
+    if topic.is_empty() {
+        return Err(anyhow!("`{s}` has an empty topic"));
+    }
+    let partition = part
+        .parse::<i64>()
+        .ok()
+        .filter(|p| *p >= 0)
+        .ok_or_else(|| anyhow!("partition `{part}` is not a non-negative integer"))?;
+    Ok(json!({"topic": topic, "partition": partition}))
+}
+
+/// Build a `topic-partition` string `topic-N` from a topic and partition — the
+/// inverse of `parse_topic_partition`. opts: `topic` (required), `partition`
+/// (non-negative integer, required), optional `separator` (default `-`; pass
+/// `:` for the `topic:N` form). Returns `{value}`. Pure.
+fn op_format_topic_partition(opts: Value) -> Result<Value> {
+    let topic = opts
+        .get("topic")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing topic"))?;
+    let partition = opts
+        .get("partition")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("missing partition"))?;
+    if partition < 0 {
+        return Err(anyhow!("partition must be non-negative"));
+    }
+    let sep = opts.get("separator").and_then(Value::as_str).unwrap_or("-");
+    Ok(json!({"value": format!("{topic}{sep}{partition}")}))
+}
+
+/// Validate and canonicalize a `compression.type` value. Kafka accepts
+/// `none|gzip|snappy|lz4|zstd` (and the alias `producer` on the broker side, for
+/// topic config). Matching is case-insensitive; the canonical lowercase form is
+/// returned. opts: `value` (or `type`, required). Returns `{value, valid,
+/// canonical}` — `canonical` is null when invalid. Pure.
+fn op_compression_codec(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("type"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let canonical = match v.to_ascii_lowercase().as_str() {
+        "none" => Some("none"),
+        "gzip" => Some("gzip"),
+        "snappy" => Some("snappy"),
+        "lz4" => Some("lz4"),
+        "zstd" => Some("zstd"),
+        "producer" => Some("producer"),
+        _ => None,
+    };
+    Ok(json!({"value": v, "valid": canonical.is_some(), "canonical": canonical}))
+}
+
+/// Validate and canonicalize a `cleanup.policy` value. Kafka accepts `delete`,
+/// `compact`, or both (`delete,compact` / `compact,delete`). Whitespace and case
+/// are normalized; the canonical form lists the policies in a stable order
+/// (`compact` before `delete`) joined by `,`. opts: `value` (or `policy`,
+/// required). Returns `{value, valid, canonical, policies}` — `canonical`/`policies`
+/// null/empty when invalid. Pure.
+fn op_cleanup_policy(opts: Value) -> Result<Value> {
+    let v = opts
+        .get("value")
+        .or_else(|| opts.get("policy"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let mut compact = false;
+    let mut delete = false;
+    let mut valid = true;
+    for tok in v.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        match tok.to_ascii_lowercase().as_str() {
+            "compact" => compact = true,
+            "delete" => delete = true,
+            _ => valid = false,
+        }
+    }
+    if !compact && !delete {
+        valid = false;
+    }
+    if !valid {
+        return Ok(json!({"value": v, "valid": false, "canonical": Value::Null, "policies": []}));
+    }
+    let mut policies = Vec::new();
+    if compact {
+        policies.push("compact");
+    }
+    if delete {
+        policies.push("delete");
+    }
+    Ok(json!({
+        "value": v,
+        "valid": true,
+        "canonical": policies.join(","),
+        "policies": policies,
+    }))
+}
+
+/// Canonicalize a producer `acks` value to its numeric form. Kafka accepts
+/// `0`, `1`, and `all` (where `all` is equivalent to `-1`). Returns the numeric
+/// acks (`-1` for `all`) and whether it requests full-ISR durability. opts:
+/// `value` (or `acks`, required; a number or string). Returns `{value, acks,
+/// all}`. Errors on any other value. Pure.
+fn op_acks_value(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("value")
+        .or_else(|| opts.get("acks"))
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let acks: i64 = match raw {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| anyhow!("acks must be an integer or `all`"))?,
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "all" | "-1" => -1,
+            "0" => 0,
+            "1" => 1,
+            other => return Err(anyhow!("unknown acks `{other}` (want 0|1|all|-1)")),
+        },
+        _ => return Err(anyhow!("acks must be an integer or `all`")),
+    };
+    if !(-1..=1).contains(&acks) {
+        return Err(anyhow!("acks must be 0, 1, or all/-1"));
+    }
+    Ok(json!({"value": raw, "acks": acks, "all": acks == -1}))
+}
+
+/// Parse a human duration into milliseconds — the unit Kafka topic configs use
+/// (`retention.ms`, `segment.ms`, `delete.retention.ms`, …). Accepts a plain
+/// number (already millis) or a suffixed string: `ms`, `s`, `m`, `h`, `d`, `w`
+/// (e.g. `7d`, `12h`, `30m`, `500ms`). Kafka's `-1` sentinel (infinite
+/// retention) passes through. opts: `value` (or `duration`, required; a number or
+/// string). Returns `{value, ms}`. Pure.
+fn op_parse_duration_ms(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("value")
+        .or_else(|| opts.get("duration"))
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let ms: i64 = match raw {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| anyhow!("duration must be an integer or a suffixed string"))?,
+        Value::String(s) => {
+            let s = s.trim();
+            if s == "-1" {
+                -1
+            } else {
+                // Split the trailing alphabetic unit from the leading number.
+                let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+                let (num, unit) = s.split_at(split);
+                let n: i64 = num
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow!("`{s}` has no numeric part"))?;
+                if n < 0 {
+                    return Err(anyhow!(
+                        "duration must be non-negative (or -1 for infinite)"
+                    ));
+                }
+                let mult: i64 = match unit.trim().to_ascii_lowercase().as_str() {
+                    "" | "ms" => 1,
+                    "s" | "sec" => 1_000,
+                    "m" | "min" => 60_000,
+                    "h" | "hr" => 3_600_000,
+                    "d" | "day" => 86_400_000,
+                    "w" | "wk" => 604_800_000,
+                    other => return Err(anyhow!("unknown duration unit `{other}` (ms|s|m|h|d|w)")),
+                };
+                n.checked_mul(mult)
+                    .ok_or_else(|| anyhow!("duration overflows i64 milliseconds"))?
+            }
+        }
+        _ => return Err(anyhow!("duration must be an integer or a suffixed string")),
+    };
+    Ok(json!({"value": raw, "ms": ms}))
+}
+
+/// Assess a partition's replication health from its replica set, in-sync replica
+/// set, and the topic's `min.insync.replicas`. Reports whether the partition is
+/// under-replicated (fewer ISR than replicas) and under-min-ISR (fewer ISR than
+/// `min_isr`, the point at which an `acks=all` produce fails). opts: `replicas`
+/// (array of broker ids), `isr` (array of broker ids; a subset of replicas),
+/// `min_isr` (default 1). Returns `{replicas, isr, in_sync, under_replicated,
+/// under_min_isr, healthy}`. Pure.
+fn op_isr_health(opts: Value) -> Result<Value> {
+    let count = |key: &str| -> Result<usize> {
+        Ok(opts
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("missing {key} (array of broker ids)"))?
+            .len())
+    };
+    let replicas = count("replicas")?;
+    let isr = count("isr")?;
+    let min_isr = opts.get("min_isr").and_then(Value::as_u64).unwrap_or(1) as usize;
+    if isr > replicas {
+        return Err(anyhow!("isr ({isr}) cannot exceed replicas ({replicas})"));
+    }
+    let under_replicated = isr < replicas;
+    let under_min_isr = isr < min_isr;
+    Ok(json!({
+        "replicas": replicas,
+        "isr": isr,
+        "min_isr": min_isr,
+        "under_replicated": under_replicated,
+        "under_min_isr": under_min_isr,
+        "healthy": !under_replicated && !under_min_isr,
+    }))
+}
+
+/// Compute consumer lag from committed offsets and high watermarks — the same
+/// `high - committed` arithmetic `lag` performs against a live broker, but pure,
+/// so a caller can compute lag from offsets it already fetched. opts: `partitions`,
+/// an array of `{partition, committed, high}` (a `committed` of `-1`/null means no
+/// commit yet → lag is the full backlog `high`). Returns `{partitions:
+/// [{partition, committed, high, lag}], total_lag}`. Pure. The offline companion
+/// of the broker-touching `lag` op.
+fn op_offset_lag(opts: Value) -> Result<Value> {
+    let rows = opts
+        .get("partitions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing partitions (array of {{partition, committed, high}})"))?;
+    let mut out = Vec::with_capacity(rows.len());
+    let mut total_lag = 0i64;
+    for r in rows {
+        let partition = r
+            .get("partition")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("each row needs an integer `partition`"))?;
+        let high = r
+            .get("high")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("each row needs an integer `high` watermark"))?;
+        // A null or -1 committed offset means the group never committed here.
+        let committed = match r.get("committed") {
+            Some(Value::Null) | None => -1,
+            Some(v) => v
+                .as_i64()
+                .ok_or_else(|| anyhow!("`committed` must be an integer or null"))?,
+        };
+        let lag = if committed < 0 {
+            high.max(0)
+        } else {
+            (high - committed).max(0)
+        };
+        total_lag += lag;
+        out.push(json!({
+            "partition": partition,
+            "committed": committed,
+            "high": high,
+            "lag": lag,
+        }));
+    }
+    Ok(json!({"partitions": out, "total_lag": total_lag}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1717,6 +2125,21 @@ pub extern "C" fn kafka__alter_configs(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn kafka__delete_groups(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_delete_groups)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__delete_records(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_delete_records)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__describe_group(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_describe_group)
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__committed(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_committed)
 }
 
 #[no_mangle]
@@ -1817,6 +2240,51 @@ pub extern "C" fn kafka__assignment_by_broker(args: *const c_char) -> *const c_c
 #[no_mangle]
 pub extern "C" fn kafka__format_offset(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_format_offset(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__topic_metric_name(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_topic_metric_name(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__parse_topic_partition(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_topic_partition(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__format_topic_partition(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_format_topic_partition(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__compression_codec(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_compression_codec(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__cleanup_policy(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_cleanup_policy(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__acks_value(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_acks_value(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__parse_duration_ms(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_duration_ms(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__isr_health(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_isr_health(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn kafka__offset_lag(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_offset_lag(opts) })
 }
 
 #[cfg(test)]
@@ -2382,6 +2850,20 @@ mod tests {
                 "missing entries",
             ),
             (kafka__delete_groups, r#"{}"#, "missing groups"),
+            (kafka__delete_records, r#"{"partition":0}"#, "missing topic"),
+            (
+                kafka__delete_records,
+                r#"{"topic":"t"}"#,
+                "missing partition",
+            ),
+            (
+                kafka__delete_records,
+                r#"{"topic":"t","partition":0}"#,
+                "missing before",
+            ),
+            (kafka__describe_group, r#"{}"#, "missing group"),
+            (kafka__committed, r#"{"topic":"t"}"#, "missing group"),
+            (kafka__committed, r#"{"group":"g"}"#, "missing topic"),
         ];
         for (f, arg, want) in cases {
             let start = std::time::Instant::now();
@@ -3011,5 +3493,247 @@ mod tests {
         );
         assert!(op_format_offset(json!({"name": "whoknows"})).is_err());
         assert!(op_format_offset(json!({})).is_err());
+    }
+
+    #[test]
+    fn topic_metric_name_unifies_periods() {
+        let v = op_topic_metric_name(json!({"name": "my.topic"})).unwrap();
+        assert_eq!(v["metric_name"], json!("my_topic"));
+        assert_eq!(v["has_collision_chars"], json!(true));
+        // Agrees with topics_collide's unify step.
+        let collide = op_topics_collide(json!({"a": "a.b.c", "b": "x"})).unwrap();
+        assert_eq!(
+            op_topic_metric_name(json!({"name": "a.b.c"})).unwrap()["metric_name"],
+            collide["unified_a"]
+        );
+        // A plain name is unchanged and has no collision chars.
+        let plain = op_topic_metric_name(json!({"name": "orders"})).unwrap();
+        assert_eq!(plain["metric_name"], json!("orders"));
+        assert_eq!(plain["has_collision_chars"], json!(false));
+        assert!(op_topic_metric_name(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_and_format_topic_partition_round_trip() {
+        // Final `-` splits; the topic itself may contain `-` and `.`.
+        let v = op_parse_topic_partition(json!({"value": "my-topic.name-7"})).unwrap();
+        assert_eq!(v["topic"], json!("my-topic.name"));
+        assert_eq!(v["partition"], json!(7));
+        // A `:` separator is unambiguous and preferred.
+        let c = op_parse_topic_partition(json!({"value": "orders:12"})).unwrap();
+        assert_eq!(c["topic"], json!("orders"));
+        assert_eq!(c["partition"], json!(12));
+        // `tp` alias.
+        assert_eq!(
+            op_parse_topic_partition(json!({"tp": "t-0"})).unwrap()["partition"],
+            json!(0)
+        );
+        // format is the inverse.
+        let f =
+            op_format_topic_partition(json!({"topic": "my-topic.name", "partition": 7})).unwrap();
+        assert_eq!(f["value"], json!("my-topic.name-7"));
+        assert_eq!(
+            op_format_topic_partition(json!({"topic": "t", "partition": 3, "separator": ":"}))
+                .unwrap()["value"],
+            json!("t:3")
+        );
+        // Round-trip the colon form through both.
+        let rt = op_parse_topic_partition(json!({ "value":
+            op_format_topic_partition(json!({"topic": "evt", "partition": 5, "separator": ":"}))
+                .unwrap()["value"] }))
+        .unwrap();
+        assert_eq!(rt["topic"], json!("evt"));
+        assert_eq!(rt["partition"], json!(5));
+        // `t--1` is a valid TP: the final `-` splits to topic `t-`, partition 1
+        // (a topic legitimately ending in `-`), NOT a negative partition.
+        let trailing = op_parse_topic_partition(json!({"value": "t--1"})).unwrap();
+        assert_eq!(trailing["topic"], json!("t-"));
+        assert_eq!(trailing["partition"], json!(1));
+        // A genuinely negative partition (via the unambiguous `:` form) is rejected.
+        assert!(op_parse_topic_partition(json!({"value": "t:-1"})).is_err());
+        // Errors: no separator, non-numeric partition, empty topic, missing.
+        assert!(op_parse_topic_partition(json!({"value": "nopartition"})).is_err());
+        assert!(op_parse_topic_partition(json!({"value": "t-x"})).is_err());
+        assert!(op_parse_topic_partition(json!({"value": ":5"})).is_err());
+        assert!(op_parse_topic_partition(json!({})).is_err());
+        assert!(op_format_topic_partition(json!({"topic": "t", "partition": -1})).is_err());
+        assert!(op_format_topic_partition(json!({"partition": 0})).is_err());
+        assert!(op_format_topic_partition(json!({"topic": "t"})).is_err());
+    }
+
+    #[test]
+    fn compression_codec_validates_and_canonicalizes() {
+        let v = op_compression_codec(json!({"value": "ZSTD"})).unwrap();
+        assert_eq!(v["valid"], json!(true));
+        assert_eq!(v["canonical"], json!("zstd"));
+        for ok in ["none", "gzip", "snappy", "lz4", "zstd", "producer"] {
+            assert_eq!(
+                op_compression_codec(json!({ "value": ok })).unwrap()["valid"],
+                json!(true),
+                "{ok} must be valid"
+            );
+        }
+        let bad = op_compression_codec(json!({"value": "brotli"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["canonical"], Value::Null);
+        // `type` alias.
+        assert_eq!(
+            op_compression_codec(json!({"type": "Gzip"})).unwrap()["canonical"],
+            json!("gzip")
+        );
+        assert!(op_compression_codec(json!({})).is_err());
+    }
+
+    #[test]
+    fn cleanup_policy_validates_and_orders() {
+        // Single policies.
+        assert_eq!(
+            op_cleanup_policy(json!({"value": "delete"})).unwrap()["canonical"],
+            json!("delete")
+        );
+        assert_eq!(
+            op_cleanup_policy(json!({"value": "compact"})).unwrap()["canonical"],
+            json!("compact")
+        );
+        // Both, in either input order, canonicalize to `compact,delete`.
+        assert_eq!(
+            op_cleanup_policy(json!({"value": "delete, compact"})).unwrap()["canonical"],
+            json!("compact,delete")
+        );
+        assert_eq!(
+            op_cleanup_policy(json!({"policy": "COMPACT,DELETE"})).unwrap()["canonical"],
+            json!("compact,delete")
+        );
+        // Invalid token.
+        let bad = op_cleanup_policy(json!({"value": "archive"})).unwrap();
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["canonical"], Value::Null);
+        // Empty → invalid.
+        assert_eq!(
+            op_cleanup_policy(json!({"value": " , "})).unwrap()["valid"],
+            json!(false)
+        );
+        assert!(op_cleanup_policy(json!({})).is_err());
+    }
+
+    #[test]
+    fn acks_value_canonicalizes_to_numeric() {
+        assert_eq!(
+            op_acks_value(json!({"value": "all"})).unwrap()["acks"],
+            json!(-1)
+        );
+        assert_eq!(
+            op_acks_value(json!({"value": "all"})).unwrap()["all"],
+            json!(true)
+        );
+        assert_eq!(
+            op_acks_value(json!({"value": -1})).unwrap()["all"],
+            json!(true)
+        );
+        assert_eq!(
+            op_acks_value(json!({"value": "1"})).unwrap()["acks"],
+            json!(1)
+        );
+        assert_eq!(op_acks_value(json!({"acks": 0})).unwrap()["acks"], json!(0));
+        assert_eq!(
+            op_acks_value(json!({"value": 1})).unwrap()["all"],
+            json!(false)
+        );
+        // Unknown values error.
+        assert!(op_acks_value(json!({"value": 2})).is_err());
+        assert!(op_acks_value(json!({"value": "quorum"})).is_err());
+        assert!(op_acks_value(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_duration_ms_handles_units_and_sentinels() {
+        let ms = |s: &str| {
+            op_parse_duration_ms(json!({ "value": s })).unwrap()["ms"]
+                .as_i64()
+                .unwrap()
+        };
+        assert_eq!(ms("500ms"), 500);
+        assert_eq!(ms("30s"), 30_000);
+        assert_eq!(ms("30m"), 1_800_000);
+        assert_eq!(ms("12h"), 43_200_000);
+        assert_eq!(ms("7d"), 604_800_000);
+        assert_eq!(ms("2w"), 1_209_600_000);
+        // Bare number is already millis.
+        assert_eq!(ms("86400000"), 86_400_000);
+        assert_eq!(
+            op_parse_duration_ms(json!({"value": 1000})).unwrap()["ms"],
+            json!(1000)
+        );
+        // Kafka's infinite-retention sentinel passes through.
+        assert_eq!(ms("-1"), -1);
+        assert_eq!(
+            op_parse_duration_ms(json!({"value": -1})).unwrap()["ms"],
+            json!(-1)
+        );
+        // Errors: unknown unit, no numeric part, negative non-sentinel.
+        assert!(op_parse_duration_ms(json!({"value": "5y"})).is_err());
+        assert!(op_parse_duration_ms(json!({"value": "h"})).is_err());
+        assert!(op_parse_duration_ms(json!({"value": "-5m"})).is_err());
+        assert!(op_parse_duration_ms(json!({})).is_err());
+    }
+
+    #[test]
+    fn isr_health_flags_under_replicated_and_under_min_isr() {
+        // Fully in-sync: 3 replicas, 3 ISR, min 2 → healthy.
+        let ok =
+            op_isr_health(json!({"replicas": [0, 1, 2], "isr": [0, 1, 2], "min_isr": 2})).unwrap();
+        assert_eq!(ok["under_replicated"], json!(false));
+        assert_eq!(ok["under_min_isr"], json!(false));
+        assert_eq!(ok["healthy"], json!(true));
+        // One replica out of sync: under-replicated but still meets min_isr=2.
+        let ur =
+            op_isr_health(json!({"replicas": [0, 1, 2], "isr": [0, 1], "min_isr": 2})).unwrap();
+        assert_eq!(ur["under_replicated"], json!(true));
+        assert_eq!(ur["under_min_isr"], json!(false));
+        assert_eq!(ur["healthy"], json!(false));
+        // Below min_isr: an acks=all produce would fail.
+        let bad = op_isr_health(json!({"replicas": [0, 1, 2], "isr": [0], "min_isr": 2})).unwrap();
+        assert_eq!(bad["under_min_isr"], json!(true));
+        assert_eq!(bad["isr"], json!(1));
+        // Default min_isr is 1.
+        assert_eq!(
+            op_isr_health(json!({"replicas": [0], "isr": [0]})).unwrap()["min_isr"],
+            json!(1)
+        );
+        // Errors: ISR larger than replicas, missing arrays.
+        assert!(op_isr_health(json!({"replicas": [0], "isr": [0, 1]})).is_err());
+        assert!(op_isr_health(json!({"replicas": [0]})).is_err());
+        assert!(op_isr_health(json!({})).is_err());
+    }
+
+    #[test]
+    fn offset_lag_computes_backlog_per_partition() {
+        let v = op_offset_lag(json!({"partitions": [
+            {"partition": 0, "committed": 100, "high": 150},
+            {"partition": 1, "committed": 200, "high": 200},
+        ]}))
+        .unwrap();
+        assert_eq!(v["partitions"][0]["lag"], json!(50));
+        assert_eq!(v["partitions"][1]["lag"], json!(0));
+        assert_eq!(v["total_lag"], json!(50));
+        // A null or -1 committed offset → full backlog (high).
+        let no_commit = op_offset_lag(json!({"partitions": [
+            {"partition": 0, "committed": null, "high": 75},
+            {"partition": 1, "committed": -1, "high": 25},
+        ]}))
+        .unwrap();
+        assert_eq!(no_commit["partitions"][0]["lag"], json!(75));
+        assert_eq!(no_commit["partitions"][1]["lag"], json!(25));
+        assert_eq!(no_commit["total_lag"], json!(100));
+        // committed > high (e.g. after a reset) clamps lag to 0, never negative.
+        assert_eq!(
+            op_offset_lag(json!({"partitions": [{"partition": 0, "committed": 10, "high": 5}]}))
+                .unwrap()["partitions"][0]["lag"],
+            json!(0)
+        );
+        // Errors: missing high, missing partition, missing array.
+        assert!(op_offset_lag(json!({"partitions": [{"partition": 0, "committed": 1}]})).is_err());
+        assert!(op_offset_lag(json!({"partitions": [{"committed": 1, "high": 2}]})).is_err());
+        assert!(op_offset_lag(json!({})).is_err());
     }
 }

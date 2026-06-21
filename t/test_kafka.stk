@@ -205,4 +205,50 @@ assert_eq Kafka::format_offset(-2)->{name}, "earliest",   "format_offset: -2 →
 assert_eq Kafka::format_offset("earliest")->{offset}, -2, "format_offset: earliest → -2"
 assert_dies fn { Kafka::format_offset("nonsense") }, "format_offset: rejects unknown name"
 
+# topic_metric_name: single-name metric mangling (. → _).
+assert_eq Kafka::topic_metric_name("my.topic")->{metric_name}, "my_topic", "topic_metric_name: periods unify"
+assert_eq Kafka::topic_metric_name("orders")->{has_collision_chars}, 0,    "topic_metric_name: plain name has no collision chars"
+
+# parse_topic_partition / format_topic_partition: round-trip.
+val $tp = Kafka::parse_topic_partition("my-topic.name-7")
+assert_eq $tp->{topic}, "my-topic.name", "parse_topic_partition: final - splits, topic keeps - and ."
+assert_eq $tp->{partition}, 7,           "parse_topic_partition: partition suffix"
+assert_eq Kafka::parse_topic_partition("orders:12")->{partition}, 12, "parse_topic_partition: : separator"
+assert_eq Kafka::format_topic_partition("my-topic.name", 7), "my-topic.name-7", "format_topic_partition: inverse"
+assert_eq Kafka::format_topic_partition("t", 3, ":"), "t:3", "format_topic_partition: custom separator"
+assert_dies fn { Kafka::parse_topic_partition("nopartition") }, "parse_topic_partition: rejects a bare topic"
+
+# compression_codec: validate + canonicalize.
+assert_eq Kafka::compression_codec("ZSTD")->{canonical}, "zstd", "compression_codec: case-insensitive canonical"
+assert_eq Kafka::compression_codec("brotli")->{valid}, 0,        "compression_codec: rejects unknown codec"
+
+# cleanup_policy: validate + stable order.
+assert_eq Kafka::cleanup_policy("delete, compact")->{canonical}, "compact,delete", "cleanup_policy: stable order"
+assert_eq Kafka::cleanup_policy("archive")->{valid}, 0,                             "cleanup_policy: rejects unknown policy"
+
+# acks_value: canonicalize to numeric.
+assert_eq Kafka::acks_value("all")->{acks}, -1, "acks_value: all → -1"
+assert_eq Kafka::acks_value("all")->{all},  1,  "acks_value: all flags full-ISR durability"
+assert_eq Kafka::acks_value(1)->{acks},     1,  "acks_value: numeric passes through"
+assert_dies fn { Kafka::acks_value("quorum") }, "acks_value: rejects unknown value"
+
+# parse_duration_ms: human duration → millis.
+assert_eq Kafka::parse_duration_ms("7d"),   604800000, "parse_duration_ms: 7 days"
+assert_eq Kafka::parse_duration_ms("500ms"), 500,      "parse_duration_ms: bare ms"
+assert_eq Kafka::parse_duration_ms("-1"),    -1,       "parse_duration_ms: infinite sentinel"
+assert_dies fn { Kafka::parse_duration_ms("5y") }, "parse_duration_ms: rejects unknown unit"
+
+# isr_health: replication health from replicas/isr/min_isr.
+val $h = Kafka::isr_health([0, 1, 2], [0, 1, 2], 2)
+assert_eq $h->{healthy}, 1, "isr_health: fully in-sync is healthy"
+val $u = Kafka::isr_health([0, 1, 2], [0], 2)
+assert_eq $u->{under_min_isr}, 1, "isr_health: below min.insync.replicas"
+assert_dies fn { Kafka::isr_health([0], [0, 1]) }, "isr_health: rejects ISR larger than replicas"
+
+# offset_lag: offline lag from committed + high watermark.
+val $ol = Kafka::offset_lag([ +{ partition => 0, committed => 100, high => 150 }, +{ partition => 1, committed => undef, high => 25 } ])
+assert_eq $ol->{partitions}[0]{lag}, 50, "offset_lag: high - committed"
+assert_eq $ol->{partitions}[1]{lag}, 25, "offset_lag: no commit → full backlog"
+assert_eq $ol->{total_lag}, 75,          "offset_lag: total across partitions"
+
 test_run

@@ -29,6 +29,9 @@ exports = [
     "kafka__describe_configs",
     "kafka__alter_configs",
     "kafka__delete_groups",
+    "kafka__delete_records",
+    "kafka__describe_group",
+    "kafka__committed",
     "kafka__valid_topic_name",
     "kafka__sanitize_topic_name",
     "kafka__is_internal_topic",
@@ -48,6 +51,15 @@ exports = [
     "kafka__assignment_diff",
     "kafka__assignment_by_broker",
     "kafka__format_offset",
+    "kafka__topic_metric_name",
+    "kafka__parse_topic_partition",
+    "kafka__format_topic_partition",
+    "kafka__compression_codec",
+    "kafka__cleanup_policy",
+    "kafka__acks_value",
+    "kafka__parse_duration_ms",
+    "kafka__isr_health",
+    "kafka__offset_lag",
 ]
 
 [scripts]

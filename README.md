@@ -31,7 +31,6 @@ stays slim.
 - [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick start](#0x02-quick-start)
-- [\[0x03\] CLI: `kafka`](#0x03-cli-kafka)
 - [\[0x04\] API reference](#0x04-api-reference)
 - [\[0x05\] FFI layer](#0x05-ffi-layer)
 - [\[0x06\] Tests](#0x06-tests)
@@ -140,50 +139,6 @@ Kafka::topics(brokers => "kafka-1:9094,kafka-2:9094") |> ep
 SASL / SSL connection options are deferred in v0.2.x — the only
 per-call connection opt is `brokers`.
 
-## [0x03] CLI: `kafka`
-
-```sh
-kafka produce send my-topic --value='hello' --key=k1
-kafka produce send my-topic --value='hello' --header source=cli
-cat msgs.ndjson | kafka produce stream --default-topic=my-topic
-
-kafka consume my-topic --group=stryke-test --offset-reset=earliest --max=100
-kafka consume my-topic --value-mode=json --idle-ms=60000
-
-kafka topics
-kafka admin describe my-topic
-kafka groups
-kafka cluster
-kafka lag --group=my-consumer-group [--topic=my-topic]
-
-kafka admin create-topic new-topic --partitions=6 --replication=3 \
-    --conf cleanup.policy=compact --conf retention.ms=86400000
-kafka admin delete-topic new-topic
-
-kafka ping
-kafka build                                  # cargo build --release
-kafka version
-```
-
-Global flags (env vars in brackets):
-
-```
--b, --brokers HOST1:9092,HOST2:9092  [$KAFKA_BROKERS]
-    --security-protocol PLAINTEXT|SSL|SASL_PLAINTEXT|SASL_SSL
-                                     [$KAFKA_SECURITY_PROTOCOL]
-    --sasl-mechanism PLAIN|SCRAM-SHA-256|SCRAM-SHA-512|GSSAPI|OAUTHBEARER
-                                     [$KAFKA_SASL_MECHANISM]
-    --sasl-username U                [$KAFKA_SASL_USERNAME]
-    --sasl-password PW               [$KAFKA_SASL_PASSWORD]
-    --ssl-ca PATH                    [$KAFKA_SSL_CA]
-    --ssl-cert PATH                  [$KAFKA_SSL_CERT]
-    --ssl-key PATH                   [$KAFKA_SSL_KEY]
-    --ssl-key-password PW            [$KAFKA_SSL_KEY_PASSWORD]
--X, --extra-conf K=V                 raw librdkafka override (repeatable)
-    --client-id NAME                 default: stryke-kafka-helper
-    --timeout-ms MS                  default: 10000
-```
-
 ## [0x04] API reference
 
 ### Producer
@@ -231,6 +186,8 @@ Kafka::lag                $group, %opts → { group, topic, partitions, total_la
 Kafka::watermarks         $topic, %opts → { topic, partitions, total }
                                           # partitions: [{partition, low, high, count}]
 Kafka::offsets_for_times  $topic, $ts_ms, %opts → { topic, timestamp, partitions }
+Kafka::committed          $group, %opts → { group, topic, partitions }
+                                          # opts: topic (required), partition (optional)
 ```
 
 ### Admin
@@ -240,6 +197,7 @@ Kafka::topics             %opts → @names
 Kafka::describe           $topic, %opts → { topic, partition_count, partitions }
                                           # partitions: [{id, leader, replicas, isr}]
 Kafka::groups             %opts → @groups            # [{name, state, ...}]
+Kafka::describe_group     $group, %opts → { name, state, protocol, protocol_type, member_count, members }
 Kafka::cluster            %opts → { brokers, topic_count }   # brokers: [{id, host, port}]
 Kafka::create_topic       $name, %opts → { created, errors } # opts: partitions, replication, config
 Kafka::delete_topic       $name, %opts → { deleted, errors }
@@ -247,6 +205,8 @@ Kafka::create_partitions  $name, $partitions, %opts → { topic, altered, errors
 Kafka::describe_configs   %opts → { resources, errors }      # resource_type, resource_name
 Kafka::alter_configs      %opts → { altered, errors }        # + entries => { k => v }
 Kafka::delete_groups      \@groups, %opts → { deleted, errors }
+Kafka::delete_records     $topic, $partition, $before, %opts → { topic, partition, results }
+                                          # truncate a partition to $before (offset or `latest`); results: [{topic, partition, low_watermark}]
 Kafka::ping               %opts → 1 | ""
 ```
 
@@ -278,6 +238,15 @@ Kafka::replica_assignment($partitions, $replication_factor, \@brokers, %opts) �
 Kafka::assignment_by_broker(\@assignment) → { brokers:[{broker, leader, replicas, leader_count, replica_count}] }   # invert a partition→broker assignment to a per-broker view (what each broker hosts/leads); inverse of replica_assignment
 Kafka::assignment_diff(\%previous, \%current) → { revoked:{member:[partition…]}, assigned:{member:[partition…]}, moved }   # rebalance plan: what each member loses/gains; `revoked` = the cooperative-protocol give-up set
 Kafka::format_offset($n|$name)  → { offset, name }          # -1 ⇄ latest, -2 ⇄ earliest
+Kafka::topic_metric_name($name) → { name, metric_name, has_collision_chars }   # metric-namespace mangling (. → _); single-name companion of topics_collide
+Kafka::parse_topic_partition($value) → { topic, partition }   # split "topic-N" / "topic:N" (partition is the final -/: suffix); inverse of format_topic_partition
+Kafka::format_topic_partition($topic, $partition, $separator?) → $str   # build "topic-N" ($separator default "-"); inverse of parse_topic_partition
+Kafka::compression_codec($value) → { value, valid, canonical }   # validate/canonicalize compression.type (none|gzip|snappy|lz4|zstd|producer), case-insensitive
+Kafka::cleanup_policy($value)   → { value, valid, canonical, policies }   # validate/canonicalize cleanup.policy (delete|compact|both)
+Kafka::acks_value($value)       → { value, acks, all }      # canonicalize producer acks (0|1|all/-1) to numeric; dies on other values
+Kafka::parse_duration_ms($value) → $ms                      # parse a duration (number or ms|s|m|h|d|w suffix) to millis; -1 passes through
+Kafka::isr_health(\@replicas, \@isr, $min_isr?) → { replicas, isr, min_isr, under_replicated, under_min_isr, healthy }   # assess partition replication health ($min_isr default 1)
+Kafka::offset_lag(\@partitions) → { partitions, total_lag }   # offline lag from [{partition, committed, high}] (committed -1/undef = full backlog); offline companion of lag
 ```
 
 `partition_for_key` is a faithful port of Kafka's `Utils.murmur2` (seed
@@ -381,7 +350,7 @@ stryke-kafka/
     discover.stk
     topics.stk
   .github/workflows/
-    ci.yml                         # cargo + bitnami/kafka service for live tests
+    ci.yml                         # cargo check / fmt / clippy / test + cdylib artifact
     release.yml                    # cross-compile + GH release on tag push
 ```
 
@@ -390,13 +359,14 @@ stryke-kafka/
 Shipped: produce with keys/headers/partitions/timestamps + binary framing,
 consume with headers/binary/offset-commit, consumer-group lag, watermarks,
 time-based offset lookup, topic config on create, create_partitions,
-describe/alter configs, and delete_groups.
+describe/alter configs, delete_groups, describe_group, committed offsets,
+and delete_records (truncate to offset).
 
 | Open | Later |
 |---|---|
 | SASL / SSL connection options | Schema Registry (Avro / Protobuf) value modes |
 | Long-running consumer daemon (callback streaming) | Streams DSL (joins, windowed agg) |
-| `delete_records` (truncate to offset) | Transactional producer (EOS) |
+| Consumer `seek` / `position` (needs a persistent consumer handle) | Transactional producer (EOS) |
 
 ## [0xFF] License
 
