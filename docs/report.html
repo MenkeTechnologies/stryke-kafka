@@ -101,7 +101,14 @@
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier</div></div>
         <div class="stat-card"><div class="stat-val cyan">dlopen</div><div class="stat-label">Load model</div></div>
         <div class="stat-card"><div class="stat-val">JSON-over-FFI</div><div class="stat-label">Envelope</div></div>
+        <div class="stat-card"><div class="stat-val green">56</div><div class="stat-label">Public Kafka:: fns</div></div>
+        <div class="stat-card"><div class="stat-val green">55</div><div class="stat-label">kafka__* FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val">34</div><div class="stat-label">Pure (no-broker) helpers</div></div>
+        <div class="stat-card"><div class="stat-val cyan">0.18.0</div><div class="stat-label">Version</div></div>
+        <div class="stat-card"><div class="stat-val">rdkafka 0.39</div><div class="stat-label">librdkafka binding</div></div>
+        <div class="stat-card"><div class="stat-val">MIT</div><div class="stat-label">License</div></div>
       </div>
+      <p class="tutorial-subtitle">Counts: 56 public <code>Kafka::*</code> functions in <code>lib/Kafka.stk</code> (2 producer, 2 consumer, 4 consumer-offset, 13 admin/metadata, 1 plumbing, 34 pure no-broker helpers), exposed over 55 <code>kafka__*</code> <code>extern "C"</code> exports in <code>src/lib.rs</code> &mdash; <code>version</code> reuses <code>kafka__pkg_version</code> and <code>consume_stream</code> reuses <code>kafka__consume</code>, so the public surface is one wider than the export list.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">~</span>ARCHITECTURE</h2>
@@ -115,7 +122,7 @@
           <tr><td>Build</td><td>Cargo with <code>[lib] crate-type = ["cdylib"]</code>; <code>publish = false</code>; the package itself ships via <code>s pkg install -g .</code></td></tr>
           <tr><td>Install path</td><td><code>~/.stryke/store/kafka@&lt;version&gt;/</code> after <code>make install</code>; <code>use Kafka</code> from any stryke script resolves it</td></tr>
           <tr><td>Tests</td><td>zunit-style under <code>t/</code> with live-service variants when applicable</td></tr>
-          <tr><td>CI</td><td>GitHub Actions <code>.github/workflows/ci.yml</code> &mdash; cargo fmt + clippy + test, plus stryke pkg install verification</td></tr>
+          <tr><td>CI</td><td>GitHub Actions <code>.github/workflows/ci.yml</code> &mdash; cargo check / fmt / clippy / test (ubuntu + macOS) / doc, a cross-target release build (linux-gnu, x86_64 + aarch64 darwin) uploading the cdylib artifact, plus docs / polish / semantic / newline / structure gate jobs</td></tr>
         </tbody>
       </table>
 
@@ -126,17 +133,51 @@
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">&amp;</span>FFI ENVELOPE</h2>
-      <p>JSON in / JSON out across the FFI boundary. Each <code>Kafka::*</code> wrapper serializes its args to a JSON dict and calls the matching <code>kafka__*</code> symbol on the dlopen'd cdylib; the cdylib returns a JSON <code>CString</code> the wrapper parses. <code>catch_unwind</code> on every call converts panics to JSON errors. The returned <code>CString</code> is freed via the cdylib-exported <code>stryke_free_cstring</code>, wired automatically by <code>rust_ffi::load_cdylib</code>.</p>
-<pre># request shape (built by the .stk wrapper)
-{"verb": "&lt;op&gt;", "...": ...}
+      <p>JSON in / JSON out across the FFI boundary. Each <code>Kafka::*</code> wrapper builds a per-call args hash, <code>to_json</code>s it, and calls the matching <code>kafka__*</code> symbol on the dlopen'd cdylib &mdash; the operation is encoded in the symbol name (e.g. <code>kafka__produce</code>), not a field in the payload. The cdylib returns a JSON string; the wrapper's <code>Kafka::_decode</code> runs <code>from_json</code>, and if the result is a hash carrying an <code>error</code> key it dies with <code>Kafka::&lt;op&gt;: &lt;reason&gt;</code>, otherwise it returns the decoded value directly.</p>
+<pre># request shape — the per-fn args hash the .stk wrapper builds,
+# merged with the caller's connection opts (brokers)
+{"topic": "events", "value": "hi", "key": "k1"}     # e.g. kafka__produce
 
 # response shape
-{"result": ...}            # success — per-fn shape
-{"error": "&lt;msg&gt;"}        # failure — wrapper dies with Kafka::&lt;op&gt;: &lt;reason&gt;</pre>
+{ ...per-fn result... }       # success — returned to the caller as-is
+{"error": "&lt;msg&gt;"}            # failure — wrapper dies with Kafka::&lt;op&gt;: &lt;reason&gt;</pre>
+      <p>Connection options are merged by <code>Kafka::_req</code>, which copies the caller's <code>brokers</code> opt into the request when present; the cdylib otherwise falls back to <code>$KAFKA_BROKERS</code> (default <code>localhost:9092</code>).</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">[]</span>SURFACE BY FAMILY</h2>
+      <p>The public surface in <code>lib/Kafka.stk</code> groups into six families. Broker-bound families issue real metadata / produce / consume / admin requests; the pure family computes Kafka semantics offline (partition prediction, rebalance planning, config validation, topic-name hygiene) with no broker round trip.</p>
+      <table class="arch-table">
+        <thead><tr><th>Family</th><th>Count</th><th>Functions</th></tr></thead>
+        <tbody>
+          <tr><td>Producer</td><td>2</td><td><code>produce</code>, <code>produce_many</code></td></tr>
+          <tr><td>Consumer</td><td>2</td><td><code>consume</code>, <code>consume_stream</code></td></tr>
+          <tr><td>Consumer offsets</td><td>4</td><td><code>lag</code>, <code>watermarks</code>, <code>offsets_for_times</code>, <code>committed</code></td></tr>
+          <tr><td>Admin / metadata</td><td>13</td><td><code>ping</code>, <code>cluster</code>, <code>topics</code>, <code>describe</code>, <code>groups</code>, <code>describe_group</code>, <code>create_topic</code>, <code>delete_topic</code>, <code>create_partitions</code>, <code>describe_configs</code>, <code>alter_configs</code>, <code>delete_groups</code>, <code>delete_records</code></td></tr>
+          <tr><td>Plumbing</td><td>1</td><td><code>version</code></td></tr>
+          <tr><td>Pure (no broker)</td><td>34</td><td>topic-name (<code>valid_topic_name</code>, <code>sanitize_topic_name</code>, <code>is_internal_topic</code>, <code>topics_collide</code>, <code>topic_metric_name</code>), brokers (<code>parse_brokers</code>, <code>build_brokers</code>, <code>normalize_brokers</code>), partitioners (<code>partition_for_key</code>, <code>partition_for_key_crc32</code>, <code>partition_for_key_fnv1a</code>, <code>partition_distribution</code>), coordinators (<code>group_coordinator_partition</code>, <code>transaction_coordinator_partition</code>), assignors (<code>range_assignment</code>, <code>roundrobin_assignment</code>, <code>sticky_assignment</code>, <code>replica_assignment</code>, <code>assignment_by_broker</code>, <code>assignment_diff</code>), offsets / config (<code>format_offset</code>, <code>parse_topic_partition</code>, <code>format_topic_partition</code>, <code>compression_codec</code>, <code>cleanup_policy</code>, <code>acks_value</code>, <code>parse_duration_ms</code>, <code>humanize_duration_ms</code>, <code>isr_health</code>, <code>offset_lag</code>, <code>security_protocol</code>, <code>auto_offset_reset</code>, <code>isolation_level</code>, <code>timestamp_type</code>)</td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">+</span>DEPENDENCIES</h2>
+      <p>The cdylib is self-contained: <code>rdkafka</code>'s <code>cmake-build</code> feature compiles librdkafka from source rather than linking a system <code>.so</code>, adding ~3-5 minutes to a first build (subsequent builds reuse the cached static archive).</p>
+      <table class="arch-table">
+        <thead><tr><th>Crate</th><th>Version</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>rdkafka</code></td><td>0.39 (<code>cmake-build</code>, <code>libz</code>, <code>tokio</code>)</td><td>librdkafka binding &mdash; producer, consumer, admin client</td></tr>
+          <tr><td><code>tokio</code></td><td>1 (multi-thread rt)</td><td>shared async runtime held in <code>OnceCell</code></td></tr>
+          <tr><td><code>serde</code> / <code>serde_json</code></td><td>1 (<code>preserve_order</code>)</td><td>JSON envelope (de)serialization</td></tr>
+          <tr><td><code>indexmap</code></td><td>2</td><td>order-preserving maps for JSON output</td></tr>
+          <tr><td><code>futures</code></td><td>0.3</td><td>async combinators for batched produce</td></tr>
+          <tr><td><code>once_cell</code> / <code>parking_lot</code></td><td>1 / 0.12</td><td>runtime + per-brokers client cache</td></tr>
+          <tr><td><code>anyhow</code></td><td>1</td><td>error context inside the cdylib</td></tr>
+        </tbody>
+      </table>
+      <p>Release profile: <code>opt-level = 3</code>, <code>lto = "thin"</code>, <code>codegen-units = 1</code>, <code>strip = true</code>, <code>panic = "abort"</code>.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">/</span>SCOPE</h2>
-      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-kafka#readme">"Why this is a package"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage".</p>
+      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-kafka#readme">"Why this is a package"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage". <strong>Shipped:</strong> produce with keys/headers/partitions/timestamps + binary framing, consume with headers/binary/offset-commit, consumer-group lag, watermarks, time-based offset lookup, topic config on create, create_partitions, describe/alter configs, delete_groups, describe_group, committed offsets, and delete_records (truncate to offset). <strong>Deferred:</strong> SASL / SSL connection options, a long-running consumer daemon (callback streaming), consumer <code>seek</code> / <code>position</code>, Schema Registry value modes, a Streams DSL, and a transactional producer (EOS).</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">#</span>PROJECT METADATA</h2>
