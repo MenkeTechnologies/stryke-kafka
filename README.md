@@ -94,7 +94,7 @@ $ENV{KAFKA_BROKERS} = "localhost:9092"
 p Kafka::ping() ? "alive" : "down"
 
 # Produce.
-my $r = Kafka::produce "events", "hello stryke", key => "k1"
+val $r = Kafka::produce "events", "hello stryke", key => "k1"
 p "wrote $r->{topic}/$r->{partition}@$r->{offset}"
 
 # Bulk produce — array of { value, key? } hashrefs; topic is a named arg.
@@ -105,7 +105,7 @@ Kafka::produce_many [
 ], topic => "events"
 
 # Snapshot consume — up to `limit` messages within `timeout_ms`.
-my @msgs = Kafka::consume "events",
+val @msgs = Kafka::consume "events",
     group      => "stryke-demo",
     limit      => 100,
     timeout_ms => 5_000
@@ -113,7 +113,7 @@ my @msgs = Kafka::consume "events",
 
 # Callback per message (snapshot pull, then iterate).
 Kafka::consume_stream "events",
-    callback => sub ($m) {
+    callback => fn ($m) {
         p "$m->{partition}.$m->{offset}: $m->{value}"
     }
 
@@ -121,7 +121,7 @@ Kafka::consume_stream "events",
 p $_ for Kafka::topics()
 
 Kafka::create_topic "new-topic", partitions => 6, replication => 1
-my $info = Kafka::describe "new-topic"
+val $info = Kafka::describe "new-topic"
 p to_json $info
 ```
 
