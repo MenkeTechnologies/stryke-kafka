@@ -24,6 +24,8 @@ stays slim.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-redis`](https://github.com/MenkeTechnologies/stryke-redis) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-kafka/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-kafka/report.html)
+
 ---
 
 ## Table of Contents
