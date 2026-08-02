@@ -136,8 +136,8 @@ $ENV{KAFKA_BROKERS} = "localhost:9092"        # default
 Kafka::topics(brokers => "kafka-1:9094,kafka-2:9094") |> ep
 ```
 
-SASL / SSL connection options are deferred in v0.2.x — the only
-per-call connection opt is `brokers`.
+SASL / SSL connection options are deferred — the only per-call
+connection opt is `brokers`.
 
 ## [0x04] API reference
 
